@@ -21,7 +21,6 @@ import logging
 from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -216,22 +215,10 @@ class SwarmBubble(QWidget):
             self._resize_to(self._base_w, self._base_h)
             self._popup(anchor_rect)
             return
-        # 宽：内容多时直接给满 max（用户实测：内容多时小窗滚不动也没必要——
-        # max 就是按 2 倍基准设计的）；指令一行确实很短时才收窄。
-        fm = QFontMetrics(self._task_label.font())
-        task_w = fm.horizontalAdvance(self._task_label.text()) if self._task_label.isVisible() else 0
-        want_w = task_w + CARD_MARGIN * 2 + 24  # + 余量，避免临界换行
-        # 高：回答渲染高度 + 头部区高度。内容超过基准高（必然，简报几乎总超）
-        # 就直接给满 max 高——用户实测反馈：内容很多仍 274x180，要求直接 2 倍。
-        self._body.setFixedWidth(self._max_w - CARD_MARGIN * 2)
-        doc_h = self._body.document().size().toSize().height() + 6
-        head_h = self._meta_label.sizeHint().height() + CARD_SPACING
-        if self._task_label.isVisible():
-            head_h += self._task_label.sizeHint().height() + CARD_SPACING
-        need_h = doc_h + head_h + CARD_MARGIN * 2 + 44
-        width = self._max_w if want_w > self._base_w else self._base_w
-        height = self._max_h if need_h > self._base_h else self._base_h
-        self._resize_to(width, height)
+        # 宽/高：固定 max（2 倍基准），不做内容测量——用户实测反馈：
+        # 指令一行装不下的计算不准（被折成两行），高度太高还会挡住桌宠。
+        # 固定 548x360 一刀切，md 区滚动兜底长内容。
+        self._resize_to(self._max_w, self._max_h)
         self._popup(anchor_rect)
 
     def _resize_to(self, width: int, height: int) -> None:
