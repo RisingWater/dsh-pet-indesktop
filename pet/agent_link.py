@@ -2763,6 +2763,14 @@ class AgentLinkManager(QObject):
         self._worker_cancel.set()
         self._install_pending.clear()
         self._install_token += 1
+        # swarm 专用气泡随 Manager 收口（悬空置顶窗口绝不能滞留）
+        bubble = getattr(self, "_swarm_bubble_ref", None)
+        if bubble is not None:
+            try:
+                bubble.deleteLater()
+            except RuntimeError:
+                pass  # 底层 C++ 已删（Qt 生命周期先行）
+            self._swarm_bubble_ref = None
         for mon in self.monitors.values():
             mon.begin_stop()
         active = [
@@ -3316,6 +3324,23 @@ class AgentLinkManager(QObject):
             detail = permission
         else:
             detail = ""
+        # 2026-09-25 用户决策：swarm 权限卡不显示选项（once/always/reject 移除），
+        # 只提示「哪个工作区有事要决定」，应答走 web。仍登记 pending 交互
+        # （resolved 幂等清理、避免重复弹）但气泡换 SwarmBubble 小卡。
+        message = "有权限申请需要你做决定" + (f"：{self._format_command(detail)}" if detail else "")
+        if self._show_swarm_notice("权限申请", message, payload):
+            self._register_interaction(
+                "swarm", kind="approval", text=message, tool=permission,
+                command=self._format_command(detail) if detail else "",
+                interactive=False,  # 卡片无按钮：应答一律走 web
+                request_id=payload.get("requestId"),
+                workspace_id=payload.get("workspace_id"),
+                task_id=payload.get("task_id"),
+                patterns=patterns,
+                notice_shown=True,
+            )
+            return
+        # 降级（无独立气泡）：原 alert 路径带三按钮
         if detail:
             formatted = self._format_command(detail)
             text = f"{name} 请求权限：{formatted}，请选择："
@@ -3332,68 +3357,83 @@ class AgentLinkManager(QObject):
         )
 
     def _on_swarm_brief(self, agent_key: str, brief: dict) -> None:
-        """swarm 终态简报：常驻提醒卡（对齐飞书 brief_card 信息密度 + 方案 A 驻留）。        形态（多页气泡承载长文本，sticky 直到用户点「知道了」）：
-        - 标题：✅ 任务完成 / ❌ 任务失败 / ⏹️ 任务已取消 · {工作区名}
-        - 正文：❓ 任务（指令首行截 200）；💬 回答（截 1500）或 💥 失败原因（截 600）
-        - canceled 也出卡（用户手动取消同样要有结果反馈；2026-09-25 用户决策）
+        """swarm 终态简报：专用大气泡（md 渲染 + 滚动，sticky 到「知道了」）。
+
+        2026-09-25 用户决策：swarm 不再走 show_alert 队列（SpeechBubble 纯文本
+        分页装不下 md 全文），改用 SwarmBubble：
+        - 布局自上而下：完成时间+工作区名 → 指令 → 回答(md) → 知道了
+        - canceled 也出卡（用户手动取消同样要有结果反馈）
         """
         brief = brief if isinstance(brief, dict) else {}
         state = str(brief.get("state") or "")
         log.info("[swarm-brief] received state=%s task=%s answer_len=%d",
                  state, str(brief.get("task_id"))[:12], len(str(brief.get("answer") or "")))
-        if not (hasattr(self.win, "show_alert") or hasattr(self.win, "show_bubble")):
-            return
         workspace_id = str(brief.get("workspace_id") or "")
         workspace_name = self._swarm_workspace_name(workspace_id)
-        task_first = " ".join(str(brief.get("task_first_line") or "").split())
-        if len(task_first) > 200:
-            task_first = task_first[:200] + "…"
+        task_first = str(brief.get("task_first_line") or "")
         answer = str(brief.get("answer") or "").strip()
         error = str(brief.get("error") or "").strip()
-        title = ""
-        lines: list[str] = []
-        if state == "canceled":
-            title = f"⏹️ 任务已取消 · {workspace_name}"
-            if task_first:
-                lines.append(f"任务：{task_first}")
-            if answer:
-                body = answer if len(answer) <= 1500 else answer[:1500] + "…"
-                lines.append(body)
-        elif state == "failed":
-            title = f"❌ 任务失败 · {workspace_name}"
-            reason = error or answer
-            if len(reason) > 600:
-                reason = reason[:600] + "…"
-            if task_first:
-                lines.append(f"任务：{task_first}")
-            lines.append(f"失败原因：{reason or '（未提供）'}")
-        else:
-            title = f"✅ 任务完成 · {workspace_name}"
-            if task_first:
-                lines.append(f"任务：{task_first}")
-            if answer:
-                body = answer if len(answer) <= 1500 else answer[:1500] + "…"
-                lines.append(body)
-            else:
-                lines.append("（无最终回答文本）")
-        text = "\n".join(lines)
-        if not text:
+        if state == "failed":
+            answer = f"**失败原因：{error or answer or '（未提供）'}**"
+        elif state == "canceled" and not answer:
+            answer = "（任务已取消）"
+        elif not answer:
+            answer = "（无最终回答文本）"
+        bubble = self._swarm_bubble()
+        if bubble is None:
+            # 降级：无法建独立气泡（测试桩/极端环境）→ 原提醒队列路径
+            title = {"failed": "❌ 任务失败", "canceled": "⏹️ 任务已取消"}.get(
+                state, "✅ 任务完成")
+            if answer and len(answer) > 1500:
+                answer = answer[:1500] + "…"
+            text = (f"任务：{task_first}\n{answer}" if task_first else answer)
+            if hasattr(self.win, "show_alert"):
+                self.win.show_alert(text, subtitle=f"{title} · {workspace_name}",
+                                    duration_ms=0, sticky=True, alert_type="swarm_brief")
             return
-        if hasattr(self.win, "show_alert"):
-            # 方案 A：常驻提醒卡（sticky），「知道了」点掉即收；队列保证多条
-            # 简报依次展示。按钮回调按气泡约定自行 hide_bubble 关闭当前卡。
-            dismiss = getattr(self.win, "hide_bubble", None)
-            self.win.show_alert(
-                text,
-                subtitle=title,
-                duration_ms=0,          # sticky：常驻直到用户关闭
-                sticky=True,
-                buttons=[("知道了", dismiss)] if callable(dismiss) else None,
-                alert_type="swarm_brief",
-            )
-        elif hasattr(self.win, "show_bubble"):
-            # 降级路径：老窗口无提醒队列时退回 6s 气泡
-            self.win.show_bubble(f"{title}：{text}", duration_ms=6000)
+        bubble.show_brief(
+            title="任务完成", task_first=task_first, answer=answer,
+            workspace_name=workspace_name,
+            anchor_rect=self._swarm_anchor_rect(),
+        )
+
+    def _swarm_bubble(self):
+        """Manager 持有的 SwarmBubble 单例（惰性创建，GUI 线程）。"""
+        bubble = getattr(self, "_swarm_bubble_ref", None)
+        if bubble is None:
+            try:
+                # 无 QApplication（测试桩/极早环境）时构造 QWidget 会直接崩溃
+                from PySide6.QtWidgets import QApplication
+
+                if QApplication.instance() is None:
+                    return None
+                from .swarm_bubble import SwarmBubble
+
+                bubble = SwarmBubble()
+                bubble.dismissed.connect(lambda: setattr(self, "_swarm_bubble_seen", True))
+                self._swarm_bubble_ref = bubble
+            except Exception as exc:  # noqa: BLE001 —— 测试桩/无显示环境降级
+                log.warning("[swarm-brief] SwarmBubble 不可用，退回 alert 队列: %s", exc)
+                return None
+        return bubble
+
+    def _swarm_anchor_rect(self):
+        """气泡锚点：桌宠稳定边界（全局坐标）；锚点不可用回退屏幕右下内缩。"""
+        try:
+            from .window_placement import bubble_anchor_rect
+
+            rect = bubble_anchor_rect(self.win)
+            if rect is not None and not rect.isNull():
+                return rect
+        except Exception:  # noqa: BLE001
+            pass
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtCore import QRect
+
+        screen = self.win.screen() if hasattr(self.win, "screen") else None
+        avail = screen.availableGeometry() if screen else \
+            QGuiApplication.primaryScreen().availableGeometry()
+        return QRect(avail.right() - 60, avail.bottom() - 60, 60, 60)
 
     def _swarm_workspace_name(self, workspace_id: str) -> str:
         """工作区 id → 显示名（设置页测试连接时缓存的列表；无缓存退 id 前 8 位）。"""
@@ -3497,8 +3537,8 @@ class AgentLinkManager(QObject):
     def _register_swarm_question(self, payload: dict) -> None:
         """swarm 提问登记：payload 是 nexus 简报形状（question/options 顶层平铺）。
 
-        nexus 单轮一个问题（web 同款），包装成内部 questions[1] 形状复用
-        现有气泡按钮渲染（_question_buttons）；requestId 即应答身份。
+        2026-09-25 用户决策：swarm 提问卡不显示选项，只提示去 web 决定；
+        SwarmBubble 小卡展示（降级时退回原 alert+选项路径）。
         """
         name = self.AGENT_NAMES.get("swarm", "Agent Swarm")
         body = str(payload.get("question") or payload.get("title") or "").strip()
@@ -3508,6 +3548,18 @@ class AgentLinkManager(QObject):
             if isinstance(o, dict) and str(o.get("label") or "")
         ]
         questions = [{"id": 0, "question": body or "（问题）", "options": options}]
+        message = "有问题需要你做决定" + (f"：{body}" if body else "")
+        if self._show_swarm_notice("提问", message, payload):
+            self._register_interaction(
+                "swarm", kind="question", text=message,
+                questions=questions,
+                interactive=False,
+                request_id=payload.get("requestId"),
+                workspace_id=payload.get("workspace_id"),
+                task_id=payload.get("task_id"),
+                notice_shown=True,
+            )
+            return
         if body:
             text = f"{name} 在问你：{body}" + (
                 f"（{' / '.join(o['label'] for o in options)}）" if options else ""
@@ -3522,6 +3574,22 @@ class AgentLinkManager(QObject):
             workspace_id=payload.get("workspace_id"),
             task_id=payload.get("task_id"),
         )
+
+    def _show_swarm_notice(self, title: str, message: str, payload: dict) -> bool:
+        """swarm 权限/提问小卡：展示成功返回 True（调用方跳过 alert 登记）。
+
+        小卡只报「哪个工作区 + 什么事」，无选项；sticky 常驻 + 知道了。
+        展示失败（无气泡能力）返回 False，调用方走原 alert 降级路径。
+        """
+        bubble = self._swarm_bubble()
+        if bubble is None:
+            return False
+        workspace_name = self._swarm_workspace_name(str(payload.get("workspace_id") or ""))
+        bubble.show_notice(
+            title=title, message=message, workspace_name=workspace_name,
+            anchor_rect=self._swarm_anchor_rect(),
+        )
+        return True
 
     def _question_text(self, name: str, questions: list, *, prefix: str = "",
                        conditional: dict | None = None) -> str:

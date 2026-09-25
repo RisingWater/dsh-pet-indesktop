@@ -215,9 +215,10 @@ class TestManagerSwarmIntegration:
         assert mgr.pending_interactions_for("swarm") == {}
         mgr.shutdown()
 
-    def test_swarm_brief_persistent_card(self, tmp_path):
-        """简报卡：sticky 常驻 + 「知道了」按钮 + 标题带工作区名 + artifact 截 1500。"""
+    def test_swarm_brief_persistent_card(self, tmp_path, monkeypatch):
+        """简报卡降级路径（无独立气泡）：sticky 常驻 + 标题带工作区名 + artifact 截 1500。"""
         cfg, mgr = self._make_manager(tmp_path)
+        monkeypatch.setattr(mgr, "_swarm_bubble", lambda: None)
         alerts = []
 
         class _Win:
@@ -244,7 +245,8 @@ class TestManagerSwarmIntegration:
         assert "✅ 任务完成" in card["subtitle"]
         assert "任务：帮我修 bug" in card["text"]
         assert card["text"].endswith("…") and len(card["text"]) < 1600  # 1500 截断
-        assert card["buttons"] and card["buttons"][0][0] == "知道了"
+        # 降级路径不带按钮（SwarmBubble 主路径自带「知道了」；降级时 sticky 也无按钮）
+        assert card["buttons"] is None
         mgr.shutdown()
 
     def test_swarm_brief_failed_shows_error(self, tmp_path):
