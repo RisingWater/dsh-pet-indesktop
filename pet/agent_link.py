@@ -3313,15 +3313,12 @@ class AgentLinkManager(QObject):
         """swarm 终态简报：常驻提醒卡（对齐飞书 brief_card 信息密度 + 方案 A 驻留）。
 
         形态（多页气泡承载长文本，sticky 直到用户点「知道了」）：
-        - 标题：✅ 任务完成 · {工作区名} / ❌ 任务失败 · {工作区名}
-        - 正文：📤 来源行可后续补；❓ 任务（指令首行截 200）；💬 回答（截 1500）
-          或 💥 失败原因（截 600）
-        - canceled 已在 monitor 侧静默（brief_from_status 返回 None）
+        - 标题：✅ 任务完成 / ❌ 任务失败 / ⏹️ 任务已取消 · {工作区名}
+        - 正文：❓ 任务（指令首行截 200）；💬 回答（截 1500）或 💥 失败原因（截 600）
+        - canceled 也出卡（用户手动取消同样要有结果反馈；2026-09-25 用户决策）
         """
         brief = brief if isinstance(brief, dict) else {}
         state = str(brief.get("state") or "")
-        if state == "canceled":
-            return  # 双保险：monitor 侧已静默
         if not (hasattr(self.win, "show_alert") or hasattr(self.win, "show_bubble")):
             return
         workspace_id = str(brief.get("workspace_id") or "")
@@ -3333,7 +3330,14 @@ class AgentLinkManager(QObject):
         error = str(brief.get("error") or "").strip()
         title = ""
         lines: list[str] = []
-        if state == "failed":
+        if state == "canceled":
+            title = f"⏹️ 任务已取消 · {workspace_name}"
+            if task_first:
+                lines.append(f"任务：{task_first}")
+            if answer:
+                body = answer if len(answer) <= 1500 else answer[:1500] + "…"
+                lines.append(body)
+        elif state == "failed":
             title = f"❌ 任务失败 · {workspace_name}"
             reason = error or answer
             if len(reason) > 600:
@@ -3351,6 +3355,8 @@ class AgentLinkManager(QObject):
             else:
                 lines.append("（无最终回答文本）")
         text = "\n".join(lines)
+        if not text:
+            return
         if hasattr(self.win, "show_alert"):
             # 方案 A：常驻提醒卡（sticky），「知道了」点掉即收；队列保证多条
             # 简报依次展示。按钮回调按气泡约定自行 hide_bubble 关闭当前卡。

@@ -113,8 +113,6 @@ def brief_from_status(payload: dict) -> dict | None:
         state = str((payload.get("status") or {}).get("state") or "")
         if state not in TERMINAL_STATES:
             return None
-        if state == "canceled":
-            return None  # 用户主动中断，不打扰（对齐飞书白名单）
         message = (payload.get("status") or {}).get("message") or {}
         task_first = str(brief_meta.get("task_first_line") or "")
         answer = ""

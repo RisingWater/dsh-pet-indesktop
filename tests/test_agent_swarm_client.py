@@ -132,11 +132,13 @@ class TestBriefFromStatus:
         brief = brief_from_status(payload)
         assert brief["state"] == "failed" and brief["error"] == "boom"
 
-    def test_canceled_is_silent(self):
-        """canceled 不发简报（用户主动中断不打扰，对齐飞书 brief.py 白名单）。"""
+    def test_canceled_brief_card(self):
+        """canceled 也出简报卡（用户手动取消的任务同样要有结果反馈）。"""
         payload = {"kind": "status-update", "taskId": "T9",
                    "status": {"state": "canceled", "message": {"parts": []}}}
-        assert brief_from_status(payload) is None
+        brief = brief_from_status(payload)
+        assert brief is not None
+        assert brief["state"] == "canceled"
 
     def test_artifact_update_maps_completed(self):
         payload = {"kind": "artifact-update", "taskId": "T9",
@@ -264,21 +266,26 @@ class TestManagerSwarmIntegration:
         assert "❌ 任务失败" in subtitle
         assert "失败原因：boom" in text
 
-    def test_swarm_brief_canceled_silent(self, tmp_path):
+    def test_swarm_brief_canceled_card(self, tmp_path):
+        """canceled 出「⏹️ 任务已取消」常驻卡（用户手动取消也要有反馈）。"""
         cfg, mgr = self._make_manager(tmp_path)
         alerts = []
 
         class _Win:
-            def show_alert(self, *a, **k):
-                alerts.append(k)
-            def show_bubble(self, *a, **k):
-                alerts.append(k)
+            def show_alert(self, text, *, subtitle="", **kw):
+                alerts.append((subtitle, text))
             def hide_bubble(self):
                 pass
 
         mgr.win = _Win()
-        mgr._on_swarm_brief("swarm", {"state": "canceled", "workspace_id": "w1"})
-        assert alerts == []  # canceled 不打扰
+        mgr._on_swarm_brief("swarm", {
+            "state": "canceled", "workspace_id": "w1",
+            "task_first_line": "被你手动取消的任务", "answer": "",
+        })
+        subtitle, text = alerts[0]
+        assert "⏹️ 任务已取消" in subtitle
+        assert "任务：被你手动取消的任务" in text
+        mgr.shutdown()
 
     def test_swarm_brief_title_falls_back_to_patterns(self, tmp_path):
         """perm_card 对齐：title 缺省时用 patterns 拼「执行：…」。"""
