@@ -16,6 +16,10 @@ if ($existing) { exit 0 }
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 
-Start-Process -WindowStyle Hidden -FilePath 'C:\Python\Python311\python.exe' `
+# 优先仓库 venv（依赖齐全），没有才退系统 Python
+$python = Join-Path $root '.venv\Scripts\python.exe'
+if (-not (Test-Path $python)) { $python = 'C:\Python\Python311\python.exe' }
+
+Start-Process -WindowStyle Hidden -FilePath $python `
     -ArgumentList '-m', 'pet' `
     -WorkingDirectory $root
