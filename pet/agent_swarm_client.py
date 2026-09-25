@@ -87,31 +87,57 @@ def monitor_payload(payload: dict) -> dict | None:
 
 
 def brief_from_status(payload: dict) -> dict | None:
-    """终态事件 → 简报载荷 {state, task_id, text}。
+    """终态事件 → 简报载荷（对齐飞书 brief_card 的信息密度）。
 
-    文本取 artifact 全量（artifact-update）或终态 message 首个 text part。
+    返回 {state, task_id, task_first_line, answer, error}：
+    - task_first_line：指令首行（终态 message.parts 里 role=user 的首个 text，
+      或 metadata.brief.task_first_line——服务端若已注入优先）
+    - answer：artifact 全文（优先 metadata.brief.artifact，服务端从任务行解密
+      注入；回退 artifact-update 帧的 parts）
+    - error：失败原因（metadata.brief.error）
+    canceled 返回 None（用户主动中断不打扰，对齐飞书 brief.py:98 白名单）。
     """
     kind = str(payload.get("kind") or "")
+    meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    brief_meta = meta.get("brief") if isinstance(meta.get("brief"), dict) else {}
     if kind == "artifact-update":
         parts = ((payload.get("artifact") or {}).get("parts") or [])
         text = " ".join(
             str(p.get("text") or "") for p in parts
             if isinstance(p, dict) and p.get("kind") == "text"
         ).strip()
-        return {"state": "artifact", "task_id": str(payload.get("taskId") or ""),
-                "text": text}
+        return {"state": "completed", "task_id": str(payload.get("taskId") or ""),
+                "task_first_line": str(brief_meta.get("task_first_line") or ""),
+                "answer": text, "error": ""}
     if kind == "status-update":
         state = str((payload.get("status") or {}).get("state") or "")
         if state not in TERMINAL_STATES:
             return None
+        if state == "canceled":
+            return None  # 用户主动中断，不打扰（对齐飞书白名单）
         message = (payload.get("status") or {}).get("message") or {}
-        text = ""
+        task_first = str(brief_meta.get("task_first_line") or "")
+        answer = ""
         if isinstance(message, dict):
-            text = " ".join(
-                str(p.get("text") or "") for p in (message.get("parts") or [])
-                if isinstance(p, dict) and p.get("kind") == "text"
-            ).strip()
-        return {"state": state, "task_id": str(payload.get("taskId") or ""), "text": text}
+            parts = message.get("parts") or []
+            # 指令首行：role=user 的首个 text part；回答：assistant 的 text
+            for part in parts:
+                if not isinstance(part, dict) or part.get("kind") != "text":
+                    continue
+                text = str(part.get("text") or "").strip()
+                if not text:
+                    continue
+                if str(message.get("role") or "") == "user" and not task_first:
+                    task_first = text.splitlines()[0].strip() if text else ""
+                elif str(message.get("role") or "") != "user" and not answer:
+                    answer = text
+        return {
+            "state": state,
+            "task_id": str(payload.get("taskId") or ""),
+            "task_first_line": task_first,
+            "answer": str(brief_meta.get("artifact") or "") or answer,
+            "error": str(brief_meta.get("error") or ""),
+        }
     return None
 
 

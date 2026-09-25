@@ -98,21 +98,52 @@ class TestMonitorPayload:
 
 
 class TestBriefFromStatus:
-    def test_terminal_completed_takes_text(self):
+    def test_terminal_completed_takes_answer(self):
         payload = {
             "kind": "status-update", "taskId": "T9",
-            "status": {"state": "completed", "message": {"parts": [
-                {"kind": "text", "text": "干完了"},
-            ]}},
+            "status": {"state": "completed", "message": {
+                "role": "assistant",
+                "parts": [{"kind": "text", "text": "干完了"}],
+            }},
         }
         brief = brief_from_status(payload)
-        assert brief == {"state": "completed", "task_id": "T9", "text": "干完了"}
+        assert brief == {"state": "completed", "task_id": "T9",
+                         "task_first_line": "", "answer": "干完了", "error": ""}
 
-    def test_artifact_update(self):
+    def test_metadata_brief_preferred(self):
+        """服务端注入的 metadata.brief（任务行解密）优先于 message parts。"""
+        payload = {
+            "kind": "status-update", "taskId": "T9",
+            "metadata": {"brief": {"artifact": "回答全文", "task_first_line": "帮我做 x"}},
+            "status": {"state": "completed", "message": {"parts": [
+                {"kind": "text", "text": "旧文本"}],
+            }},
+        }
+        brief = brief_from_status(payload)
+        assert brief["answer"] == "回答全文"
+        assert brief["task_first_line"] == "帮我做 x"
+
+    def test_failed_takes_error(self):
+        payload = {
+            "kind": "status-update", "taskId": "T9",
+            "metadata": {"brief": {"error": "boom"}},
+            "status": {"state": "failed", "message": {"parts": []}},
+        }
+        brief = brief_from_status(payload)
+        assert brief["state"] == "failed" and brief["error"] == "boom"
+
+    def test_canceled_is_silent(self):
+        """canceled 不发简报（用户主动中断不打扰，对齐飞书 brief.py 白名单）。"""
+        payload = {"kind": "status-update", "taskId": "T9",
+                   "status": {"state": "canceled", "message": {"parts": []}}}
+        assert brief_from_status(payload) is None
+
+    def test_artifact_update_maps_completed(self):
         payload = {"kind": "artifact-update", "taskId": "T9",
                    "artifact": {"parts": [{"kind": "text", "text": "答案全文"}]}}
         brief = brief_from_status(payload)
-        assert brief is not None and brief["text"] == "答案全文" and brief["state"] == "artifact"
+        assert brief is not None and brief["answer"] == "答案全文"
+        assert brief["state"] == "completed"
 
     def test_working_is_not_brief(self):
         assert brief_from_status({"kind": "status-update",
@@ -182,6 +213,105 @@ class TestManagerSwarmIntegration:
         assert mgr.pending_interactions_for("swarm") == {}
         mgr.shutdown()
 
+    def test_swarm_brief_persistent_card(self, tmp_path):
+        """简报卡：sticky 常驻 + 「知道了」按钮 + 标题带工作区名 + artifact 截 1500。"""
+        cfg, mgr = self._make_manager(tmp_path)
+        alerts = []
+
+        class _Win:
+            def show_alert(self, text, *, subtitle="", duration_ms=0, sticky=False,
+                           buttons=None, alert_type="", **kw):
+                alerts.append({"text": text, "subtitle": subtitle, "sticky": sticky,
+                               "duration_ms": duration_ms, "buttons": buttons,
+                               "alert_type": alert_type})
+            def hide_bubble(self):
+                pass
+
+        mgr.win = _Win()
+        long_answer = "很长的回答" * 500  # 2500 字 > 1500
+        mgr._on_swarm_brief("swarm", {
+            "state": "completed", "workspace_id": "oWYak3uat54",
+            "task_first_line": "帮我修 bug",
+            "answer": long_answer, "error": "",
+        })
+        assert len(alerts) == 1
+        card = alerts[0]
+        assert card["sticky"] is True          # 方案 A：常驻
+        assert card["duration_ms"] == 0
+        assert card["alert_type"] == "swarm_brief"
+        assert "✅ 任务完成" in card["subtitle"]
+        assert "任务：帮我修 bug" in card["text"]
+        assert card["text"].endswith("…") and len(card["text"]) < 1600  # 1500 截断
+        assert card["buttons"] and card["buttons"][0][0] == "知道了"
+        mgr.shutdown()
+
+    def test_swarm_brief_failed_shows_error(self, tmp_path):
+        cfg, mgr = self._make_manager(tmp_path)
+        alerts = []
+
+        class _Win:
+            def show_alert(self, text, *, subtitle="", **kw):
+                alerts.append((subtitle, text))
+            def hide_bubble(self):
+                pass
+
+        mgr.win = _Win()
+        mgr._on_swarm_brief("swarm", {
+            "state": "failed", "workspace_id": "w1",
+            "task_first_line": "跑测试", "answer": "", "error": "boom",
+        })
+        subtitle, text = alerts[0]
+        assert "❌ 任务失败" in subtitle
+        assert "失败原因：boom" in text
+
+    def test_swarm_brief_canceled_silent(self, tmp_path):
+        cfg, mgr = self._make_manager(tmp_path)
+        alerts = []
+
+        class _Win:
+            def show_alert(self, *a, **k):
+                alerts.append(k)
+            def show_bubble(self, *a, **k):
+                alerts.append(k)
+            def hide_bubble(self):
+                pass
+
+        mgr.win = _Win()
+        mgr._on_swarm_brief("swarm", {"state": "canceled", "workspace_id": "w1"})
+        assert alerts == []  # canceled 不打扰
+
+    def test_swarm_brief_title_falls_back_to_patterns(self, tmp_path):
+        """perm_card 对齐：title 缺省时用 patterns 拼「执行：…」。"""
+        cfg, mgr = self._make_manager(tmp_path)
+        mgr._on_approval_request("swarm", {
+            "type": "permission", "requestId": "p2", "workspace_id": "w1",
+            "task_id": "T1", "permission": "bash", "title": "",
+            "patterns": ["D:\\x\\run.ps1"],
+        })
+        item = list(mgr.pending_interactions_for("swarm").values())[0]
+        assert "bash — " in item["text"] or "执行：" in item["text"] or "bash：" in item["text"]
+        assert "run.ps1" in item["text"]
+        mgr.shutdown()
+
+    def test_swarm_approval_three_buttons(self, tmp_path):
+        """swarm 审批卡三按钮：同意 / 本会话允许 / 拒绝（对齐飞书 perm_card）。"""
+        cfg, mgr = self._make_manager(tmp_path)
+        mgr._on_approval_request("swarm", {
+            "type": "permission", "requestId": "p3", "workspace_id": "w1",
+            "task_id": "T1", "title": "x",
+        })
+        iid = next(iter(mgr.pending_interactions_for("swarm")))
+        buttons = mgr._interaction_buttons(iid)
+        labels = [b[0] for b in buttons]
+        assert labels == ["同意", "本会话允许", "拒绝"]
+        # DSH 审批仍是两按钮（不回归）
+        mgr._register_interaction("dsh", kind="approval", text="t", interactive=True,
+                                  rpc_id="rpc1")
+        dsh_iid = next(iter(mgr.pending_interactions_for("dsh")))
+        dsh_labels = [b[0] for b in mgr._interaction_buttons(dsh_iid)]
+        assert dsh_labels == ["同意", "拒绝"]
+        mgr.shutdown()
+
     def test_swarm_reply_decision_mapping(self, tmp_path, monkeypatch):
         cfg, mgr = self._make_manager(tmp_path)
         submitted = []
@@ -208,6 +338,8 @@ class TestManagerSwarmIntegration:
             "workspace_id": "w1", "task_id": "T1", "kind": "permission",
             "request_id": "p1", "permission_reply": "once",
         }]
+        mgr._respond_swarm_interaction(pending, "allowed-always")
+        assert submitted[-1]["permission_reply"] == "always"
         mgr._respond_swarm_interaction(pending, "rejected")
         assert submitted[-1]["permission_reply"] == "reject"
         q_pending = {

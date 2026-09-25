@@ -3278,14 +3278,22 @@ class AgentLinkManager(QObject):
     def _register_swarm_approval(self, payload: dict) -> None:
         """swarm 审批登记：payload 是 nexus 简报形状（title/patterns/permission）。
 
-        文案优先 patterns（具体路径/命令，与 web 权限卡同源），其次 permission
-        类别、title 说明。requestId 即可交互身份（resolved 配对 + reply 回传）。
+        文案对齐飞书 perm_card：title 缺省时用 patterns[] 拼「访问/执行：…」
+        （opencode 权限事件无 title 的坑，perm_card.py:121-124）。
+        requestId 即可交互身份（resolved 配对 + reply 回传）。
         """
         name = self.AGENT_NAMES.get("swarm", "Agent Swarm")
         title = str(payload.get("title") or "").strip()
         permission = str(payload.get("permission") or "").strip()
         patterns = [str(p) for p in (payload.get("patterns") or []) if str(p)]
-        detail = "、".join(patterns) if patterns else (title or permission)
+        if title:
+            detail = title if not patterns else f"{permission} — {title}" if permission else title
+        elif patterns:
+            detail = f"{permission or '执行'}：" + "、".join(patterns)
+        elif permission:
+            detail = permission
+        else:
+            detail = ""
         if detail:
             formatted = self._format_command(detail)
             text = f"{name} 请求权限：{formatted}，请选择："
@@ -3298,24 +3306,77 @@ class AgentLinkManager(QObject):
             request_id=payload.get("requestId"),
             workspace_id=payload.get("workspace_id"),
             task_id=payload.get("task_id"),
+            patterns=patterns,
         )
 
     def _on_swarm_brief(self, agent_key: str, brief: dict) -> None:
-        """swarm 终态简报：任务完成/失败时播一句简报气泡（非阻塞交互）。"""
+        """swarm 终态简报：常驻提醒卡（对齐飞书 brief_card 信息密度 + 方案 A 驻留）。
+
+        形态（多页气泡承载长文本，sticky 直到用户点「知道了」）：
+        - 标题：✅ 任务完成 · {工作区名} / ❌ 任务失败 · {工作区名}
+        - 正文：📤 来源行可后续补；❓ 任务（指令首行截 200）；💬 回答（截 1500）
+          或 💥 失败原因（截 600）
+        - canceled 已在 monitor 侧静默（brief_from_status 返回 None）
+        """
         brief = brief if isinstance(brief, dict) else {}
         state = str(brief.get("state") or "")
-        text = str(brief.get("text") or "").strip()
-        name = self.AGENT_NAMES.get("swarm", "Agent Swarm")
-        if not hasattr(self.win, "show_bubble"):
+        if state == "canceled":
+            return  # 双保险：monitor 侧已静默
+        if not (hasattr(self.win, "show_alert") or hasattr(self.win, "show_bubble")):
             return
+        workspace_id = str(brief.get("workspace_id") or "")
+        workspace_name = self._swarm_workspace_name(workspace_id)
+        task_first = " ".join(str(brief.get("task_first_line") or "").split())
+        if len(task_first) > 200:
+            task_first = task_first[:200] + "…"
+        answer = str(brief.get("answer") or "").strip()
+        error = str(brief.get("error") or "").strip()
+        title = ""
+        lines: list[str] = []
         if state == "failed":
-            body = f"{name} 任务失败了" + (f"：{self._format_command(text, 100)}" if text else "")
-            self.win.show_bubble(body, duration_ms=6000)
-        elif state in ("completed", "canceled"):
-            if text and self._report_allowed(self.cfg.get("agent_link", {}), "done"):
-                self.win.show_bubble(
-                    f"{name} 任务完成：{self._format_command(text, 120)}", duration_ms=5000,
-                )
+            title = f"❌ 任务失败 · {workspace_name}"
+            reason = error or answer
+            if len(reason) > 600:
+                reason = reason[:600] + "…"
+            if task_first:
+                lines.append(f"任务：{task_first}")
+            lines.append(f"失败原因：{reason or '（未提供）'}")
+        else:
+            title = f"✅ 任务完成 · {workspace_name}"
+            if task_first:
+                lines.append(f"任务：{task_first}")
+            if answer:
+                body = answer if len(answer) <= 1500 else answer[:1500] + "…"
+                lines.append(body)
+            else:
+                lines.append("（无最终回答文本）")
+        text = "\n".join(lines)
+        if hasattr(self.win, "show_alert"):
+            # 方案 A：常驻提醒卡（sticky），「知道了」点掉即收；队列保证多条
+            # 简报依次展示。按钮回调按气泡约定自行 hide_bubble 关闭当前卡。
+            dismiss = getattr(self.win, "hide_bubble", None)
+            self.win.show_alert(
+                text,
+                subtitle=title,
+                duration_ms=0,          # sticky：常驻直到用户关闭
+                sticky=True,
+                buttons=[("知道了", dismiss)] if callable(dismiss) else None,
+                alert_type="swarm_brief",
+            )
+        elif hasattr(self.win, "show_bubble"):
+            # 降级路径：老窗口无提醒队列时退回 6s 气泡
+            self.win.show_bubble(f"{title}：{text}", duration_ms=6000)
+
+    def _swarm_workspace_name(self, workspace_id: str) -> str:
+        """工作区 id → 显示名（设置页测试连接时缓存的列表；无缓存退 id 前 8 位）。"""
+        cache = getattr(self, "_swarm_workspace_names", None) or {}
+        if not cache and workspace_id:
+            # 惰性初始化：从 config 里读最近一次测试连接保存的名称映射（可无）
+            cfg_names = (self.cfg.get("agent_link") or {}).get("swarm_config", {}).get("workspace_names")
+            if isinstance(cfg_names, dict):
+                cache.update({str(k): str(v) for k, v in cfg_names.items()})
+        name = cache.get(workspace_id, "")
+        return name or (workspace_id[:8] if workspace_id else "Agent Swarm")
 
     def _on_swarm_connection_error(self, agent_key: str, reason: object) -> None:
         """swarm 注册级失败（hello 被拒：key 无效/工作区无权限）：气泡提示。"""
@@ -3718,9 +3779,18 @@ class AgentLinkManager(QObject):
         按钮回调捕获 interaction_id：点击只对该条交互回写，与同一 agent 的
         其他并发审批互不干扰（修复「点同意却放行后面那个请求」的覆盖 bug）。"""
         pending = self._pending_interactions.get(interaction_id)
-        if not pending or not pending.get("interactive") or not pending.get("rpc_id"):
+        if not pending or not pending.get("interactive"):
             return None
         if pending.get("kind") == "approval":
+            if pending.get("agent_key") == "swarm":
+                # swarm（nexus reply 协议）：once/always/reject 三态，对齐飞书权限卡
+                return [
+                    ("同意", lambda iid=interaction_id: self._respond_interaction(iid, "allowed-once")),
+                    ("本会话允许", lambda iid=interaction_id: self._respond_interaction(iid, "allowed-always")),
+                    ("拒绝", lambda iid=interaction_id: self._respond_interaction(iid, "rejected")),
+                ]
+            if not pending.get("rpc_id"):
+                return None
             return [
                 ("同意", lambda iid=interaction_id: self._respond_interaction(iid, "allowed-once")),
                 ("拒绝", lambda iid=interaction_id: self._respond_interaction(iid, "rejected")),
@@ -3923,7 +3993,11 @@ class AgentLinkManager(QObject):
         if not (request_id and workspace_id):
             return
         if kind == "approval":
-            permission_reply = "reject" if str(decision) == "rejected" else "once"
+            decision_str = str(decision)
+            permission_reply = {
+                "rejected": "reject",
+                "allowed-always": "always",
+            }.get(decision_str, "once")
             mon.submit_reply(
                 workspace_id=workspace_id, task_id=task_id, kind="permission",
                 request_id=request_id, permission_reply=permission_reply,
