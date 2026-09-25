@@ -2445,6 +2445,10 @@ class AgentLinkManager(QObject):
         if swarm_mon is not None and hasattr(swarm_mon, "connection_error"):
             swarm_mon.connection_error.connect(self._on_swarm_connection_error)
             swarm_mon.brief_ready.connect(self._on_swarm_brief)
+            log.info("[swarm-brief] signal wired (monitor=%s)", type(swarm_mon).__name__)
+        else:
+            log.warning("[swarm-brief] swarm monitor missing or lacks brief signal — "
+                        "agent_swarm_client import failed?")
         self.monitors["dsh"].session_meta.connect(self._on_session_meta)
         self.monitors["dsh"].model_access.connect(self._on_model_access)
         self.monitors["dsh"].llm_error.connect(self._on_llm_error)
@@ -2530,10 +2534,17 @@ class AgentLinkManager(QObject):
                 workspaces = [str(w) for w in (swarm_cfg.get("workspaces") or [])]
                 if not workspaces:
                     workspaces = ["*"]  # 简报语义默认：全部工作区
+                key_present = bool(self.cfg.resolve_swarm_api_key())
                 swarm_mon.configure(
                     str(swarm_cfg.get("server_url") or ""),
                     self.cfg.resolve_swarm_api_key(),
                     workspaces,
+                )
+                log.info(
+                    "[swarm-brief] apply_config: enabled=%s url=%s workspaces=%s key=%s",
+                    bool(agent_cfg.get("swarm", False)),
+                    str(swarm_cfg.get("server_url") or ""),
+                    workspaces, "yes" if key_present else "NO",
                 )
         for key, monitor in self.monitors.items():
             should_run = bool(agent_cfg.get(key, False))
@@ -3310,15 +3321,15 @@ class AgentLinkManager(QObject):
         )
 
     def _on_swarm_brief(self, agent_key: str, brief: dict) -> None:
-        """swarm 终态简报：常驻提醒卡（对齐飞书 brief_card 信息密度 + 方案 A 驻留）。
-
-        形态（多页气泡承载长文本，sticky 直到用户点「知道了」）：
+        """swarm 终态简报：常驻提醒卡（对齐飞书 brief_card 信息密度 + 方案 A 驻留）。        形态（多页气泡承载长文本，sticky 直到用户点「知道了」）：
         - 标题：✅ 任务完成 / ❌ 任务失败 / ⏹️ 任务已取消 · {工作区名}
         - 正文：❓ 任务（指令首行截 200）；💬 回答（截 1500）或 💥 失败原因（截 600）
         - canceled 也出卡（用户手动取消同样要有结果反馈；2026-09-25 用户决策）
         """
         brief = brief if isinstance(brief, dict) else {}
         state = str(brief.get("state") or "")
+        log.info("[swarm-brief] received state=%s task=%s answer_len=%d",
+                 state, str(brief.get("task_id"))[:12], len(str(brief.get("answer") or "")))
         if not (hasattr(self.win, "show_alert") or hasattr(self.win, "show_bubble")):
             return
         workspace_id = str(brief.get("workspace_id") or "")
