@@ -37,9 +37,9 @@ log = logging.getLogger("dsh-pet-standalone")
 # 屏幕内边距：气泡任何边到屏幕可用区至少这个距离（用户要求：不显示在屏幕外）
 SCREEN_PADDING = 16
 
-# 卡片内边距 / 元素间距
-CARD_MARGIN = 14
-CARD_SPACING = 8
+# 卡片内边距 / 元素间距：四周留足呼吸感（用户要求 padding 充足）
+CARD_MARGIN = 20
+CARD_SPACING = 10
 
 # 文本截断上限（与 agent_link 的简报语义一致）
 TASK_FIRST_MAX = 200
@@ -88,6 +88,8 @@ class SwarmBubble(QWidget):
         )
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        # 半透明背景：QSS 12px 圆角外露出透明而不是黑底（SpeechBubble 同款）
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         # —— 尺寸基准：SpeechBubble 的实际宽高（基类卡；权限小卡也按它缩）——
         # SpeechBubble 常规宽约 274px（13px margin × 2 + 248px 列宽）、高随内容。
@@ -162,7 +164,8 @@ class SwarmBubble(QWidget):
             }}
             QTextBrowser#swarm-bubble-body {{
                 color: {color}; font-size: 13px; background: #ffffff;
-                border: none; selection-background-color: #0a84ff;
+                border: none; padding: 4px 6px;
+                selection-background-color: #0a84ff;
             }}
             QPushButton#swarm-bubble-ok {{
                 color: {color}; background: #f4f5f6; border: 1px solid {border};
@@ -213,18 +216,21 @@ class SwarmBubble(QWidget):
             self._resize_to(self._base_w, self._base_h)
             self._popup(anchor_rect)
             return
-        # 宽：指令一行宽度 + 卡片余量，夹在 [base_w, max_w]
+        # 宽：内容多时直接给满 max（用户实测：内容多时小窗滚不动也没必要——
+        # max 就是按 2 倍基准设计的）；指令一行确实很短时才收窄。
         fm = QFontMetrics(self._task_label.font())
         task_w = fm.horizontalAdvance(self._task_label.text()) if self._task_label.isVisible() else 0
         want_w = task_w + CARD_MARGIN * 2 + 24  # + 余量，避免临界换行
-        width = max(self._base_w, min(self._max_w, want_w))
-        # 高：回答渲染高度 + 头部区高度，夹在 [base_h, max_h]
-        self._body.setFixedWidth(width - CARD_MARGIN * 2)
+        # 高：回答渲染高度 + 头部区高度。内容超过基准高（必然，简报几乎总超）
+        # 就直接给满 max 高——用户实测反馈：内容很多仍 274x180，要求直接 2 倍。
+        self._body.setFixedWidth(self._max_w - CARD_MARGIN * 2)
         doc_h = self._body.document().size().toSize().height() + 6
         head_h = self._meta_label.sizeHint().height() + CARD_SPACING
         if self._task_label.isVisible():
             head_h += self._task_label.sizeHint().height() + CARD_SPACING
-        height = max(self._base_h, min(self._max_h, doc_h + head_h + CARD_MARGIN * 2 + 44))
+        need_h = doc_h + head_h + CARD_MARGIN * 2 + 44
+        width = self._max_w if want_w > self._base_w else self._base_w
+        height = self._max_h if need_h > self._base_h else self._base_h
         self._resize_to(width, height)
         self._popup(anchor_rect)
 
