@@ -226,7 +226,13 @@ class SwarmBubble(QWidget):
         self.setFixedSize(width, height)
 
     def _popup(self, anchor_rect) -> None:
-        """锚点上方居中弹出 + 屏幕边界收口（四周 SCREEN_PADDING）。"""
+        """锚点上方居中弹出 + 屏幕边界收口（四周 SCREEN_PADDING）。
+
+        气泡不跟随桌宠移动（与 SpeechBubble 行为一致）；桌宠移动过来时
+        必须保持在气泡之上（用户要求：桌宠永不被本窗口遮挡）——置顶
+        层内桌宠 > 气泡的顺序由 AgentLinkManager 在桌宠 show/raise 时
+        调 ensure_pet_above() 维持。
+        """
         x = anchor_rect.center().x() - self.width() // 2
         y = anchor_rect.top() - self.height() - 8  # 上方留 8px 呼吸
         screen = self.screen()
@@ -254,3 +260,17 @@ class SwarmBubble(QWidget):
 
     def dismiss(self) -> None:
         self.hide()
+
+    def ensure_pet_above(self, pet_window) -> None:
+        """把桌宠窗口提到本气泡之上（同为置顶层，仅调整层内顺序）。
+
+        桌宠 show/move/raise 时由 AgentLinkManager 调用；用户要求桌宠
+        永不被气泡挡住。气泡可见才需要调整，隐藏时无事可做。
+        """
+        if not self.isVisible():
+            return
+        try:
+            pet_window.raise_()
+            pet_window.activateWindow()
+        except RuntimeError:
+            pass  # 桌宠窗口底层已销毁

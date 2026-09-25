@@ -4579,6 +4579,15 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         if bubble is None:
             return  # 窗口已关闭/气泡已销毁：丢弃迟到回调
         bubble.reposition(window_placement.bubble_anchor_rect(self))
+        # swarm 专用气泡不跟随移动（用户决策），但桌宠移入其区域时必须
+        # 保持在气泡之上（同为置顶层，只需层内顺序调整，气泡位置不动）
+        swarm_bubble = getattr(self, "_swarm_bubble_ref", None)
+        if swarm_bubble is not None and swarm_bubble.isVisible():
+            try:
+                if self.frameGeometry().intersects(swarm_bubble.geometry()):
+                    swarm_bubble.ensure_pet_above(self)
+            except RuntimeError:
+                pass  # 气泡底层已销毁
         for listener in tuple(self._position_listeners):
             try:
                 listener(self)
