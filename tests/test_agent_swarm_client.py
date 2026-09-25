@@ -594,6 +594,46 @@ class TestSwarmMonitorSession:
         finally:
             mon.stop()
 
+    def test_brief_task_first_line_from_working_cache(self, nexus_stub):
+        """completed 帧不带指令文本时，用 working 阶段缓存的指令首行补全。"""
+        wid = "w9"
+        # 1) working 帧带 role=user 的任务回显（A2A 轮标准形状）
+        nexus_stub.live_events.append({
+            "kind": "status-update", "taskId": "T7",
+            "status": {"state": "working", "message": {"role": "user", "parts": [
+                {"kind": "text", "text": "帮我在桌面写个文件"}]}},
+        })
+        # 2) completed 帧只有 assistant 的回答
+        nexus_stub.live_events.append({
+            "kind": "status-update", "taskId": "T7",
+            "status": {"state": "completed", "message": {"role": "assistant", "parts": [
+                {"kind": "text", "text": "写好了"}]}},
+        })
+        mon = _make_monitor(f"http://127.0.0.1:{nexus_stub.port}", wid)
+        briefs = []
+        raws = []
+        mon.brief_ready.connect(lambda k, b: briefs.append(b))
+        orig_process = mon._process_payload
+
+        def spy(payload, ws_id, gen, **kw):
+            raws.append((str(payload.get("kind")), str((payload.get("status") or {}).get("state") or "")))
+            return orig_process(payload, ws_id, gen, **kw)
+
+        mon._process_payload = spy
+        assert mon.start() is True
+        try:
+            assert _wait_until(lambda: len(briefs) >= 1 and nexus_stub.subscribed_wids), \
+                "未在预算内收到简报"
+            assert _wait_until(lambda: len(raws) >= 2), f"帧不足: {raws}"
+            assert _wait_until(lambda: len(briefs) >= 1), \
+                f"briefs={[dict(b, answer=str(b.get('answer'))[:20]) for b in briefs]} raws={raws}"
+            final = briefs[-1]
+            assert final["state"] == "completed"
+            assert final["task_first_line"] == "帮我在桌面写个文件"
+            assert final["answer"] == "写好了"
+        finally:
+            mon.stop()
+
     def test_unconfigured_rejects_start(self):
         app = QCoreApplication.instance() or QCoreApplication([])
         mon = SwarmMonitor("swarm", _tmp_config_dir())

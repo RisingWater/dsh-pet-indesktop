@@ -165,6 +165,8 @@ class SwarmMonitor(BaseAgentMonitor):
         self._pending_requests: set[str] = set()
         # task_id → 该任务产生过的 requestId 集合（终态清扫用）
         self._task_requests: dict[str, set[str]] = {}
+        # task_id → 指令首行（简报卡「任务：」行）
+        self._task_first_lines: dict[str, str] = {}
         # 回放缓冲（对接文档 §5 去重）：[(task_id, request_id)]；已证实被答的 rid；
         # rid → 完整载荷（flush 时弹窗用）
         self._replay_buffer: list[tuple[str, str]] = []
@@ -427,6 +429,28 @@ class SwarmMonitor(BaseAgentMonitor):
             return
         # ③ 状态与简报
         state = str((payload.get("status") or {}).get("state") or "")
+        # 指令首行缓存：working 帧的 message 里 role=user 的 text 是任务回显
+        #（A2A 轮）；metadata.brief.task_first_line（服务端注入）优先。供终态
+        # 简报卡「任务：」行取用（completed 帧本身不带指令文本）。
+        task_id_now = str(payload.get("taskId") or "")
+        if task_id_now and task_id_now not in self._task_first_lines:
+            brief_meta = (payload.get("metadata") or {}).get("brief") or {}
+            first = str(brief_meta.get("task_first_line") or "")
+            if not first and isinstance(payload.get("status"), dict):
+                message = payload["status"].get("message") or {}
+                if isinstance(message, dict):
+                    for part in (message.get("parts") or []):
+                        if isinstance(part, dict) and part.get("kind") == "text":
+                            text = str(part.get("text") or "").strip()
+                            if text:
+                                if str(message.get("role") or "") == "user":
+                                    first = text.splitlines()[0].strip()
+                                break
+            if first:
+                self._task_first_lines[task_id_now] = first
+                if len(self._task_first_lines) > 64:
+                    # 有界：丢最旧的（dict 保序，pop 首个）
+                    self._task_first_lines.pop(next(iter(self._task_first_lines)))
         if replay and state in ("working", *TERMINAL_STATES):
             # 回放中的 working/终态：同任务此前缓冲的 input-required 已被应答
             for task_id, rid in self._replay_buffer:
@@ -440,6 +464,9 @@ class SwarmMonitor(BaseAgentMonitor):
         brief = brief_from_status(payload)
         if brief is not None:
             brief = dict(brief, workspace_id=workspace_id)
+            if not brief.get("task_first_line"):
+                # completed 帧不带指令文本：用 working 阶段缓存的指令首行
+                brief["task_first_line"] = self._task_first_lines.get(brief["task_id"], "")
             self._emit(self.brief_ready, (self.agent_key, brief))
             if brief["state"] in TERMINAL_STATES:
                 self._emit_state("idle", gen)

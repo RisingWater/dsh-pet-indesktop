@@ -851,6 +851,18 @@ def _swarm_test_connection(host) -> None:
         host.swarm_status_label.setText(
             f"连接成功（HTTP {resp.status}）；你名下 {len(items)} 个工作区（在线 {online}）都在简报范围内"
         )
+        # 工作区 id → 名称缓存：写进 config（简报卡标题显示工作区名）
+        names = {
+            str(w.get("id")): str(w.get("name") or w.get("id"))
+            for w in items if isinstance(w, dict) and w.get("id")
+        }
+        if names:
+            ag = dict(host.config.get("agent_link", {}))
+            scfg = dict(ag.get("swarm_config") or {})
+            scfg["workspace_names"] = names
+            ag["swarm_config"] = scfg
+            host.config.set("agent_link", ag)
+            host.config.save()
     except Exception as exc:  # noqa: BLE001
         detail = str(exc)
         code = getattr(exc, "code", None)

@@ -2449,6 +2449,17 @@ class AgentLinkManager(QObject):
         else:
             log.warning("[swarm-brief] swarm monitor missing or lacks brief signal — "
                         "agent_swarm_client import failed?")
+        # 工作区 id → 名称缓存（设置页测试连接/刷新时由对话框写入 config，
+        # 简报卡标题用它显示「工作区名」而不是 id 前 8 位）
+        try:
+            names = dict((self.cfg.get("agent_link") or {}).get("swarm_config", {}).get("workspace_names") or {})
+        except Exception:
+            names = {}
+        self._swarm_workspace_names = {str(k): str(v) for k, v in names.items() if k and v}
+        # 任务 id → 指令首行（简报卡「任务：」行）：A2A 轮的 user 消息回显帧
+        #（msg-{taskId}-user）与 monitor 轮的 user-text 事件都会经过这里，
+        # 按 taskId/roundKey 缓存，终态简报时取用。
+        self._swarm_task_first_line: dict[str, str] = {}
         self.monitors["dsh"].session_meta.connect(self._on_session_meta)
         self.monitors["dsh"].model_access.connect(self._on_model_access)
         self.monitors["dsh"].llm_error.connect(self._on_llm_error)
