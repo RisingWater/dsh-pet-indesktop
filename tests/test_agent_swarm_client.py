@@ -634,6 +634,63 @@ class TestSwarmMonitorSession:
         finally:
             mon.stop()
 
+    def test_monitor_round_idle_brief(self, nexus_stub):
+        """monitor 轮（扁平形状）idle 帧出简报：user-text 缓存指令首行 +
+        brief.artifact 作回答。回归：monitor 帧无 kind 字段曾被 brief_from_status
+        静默漏掉（2026-09-25 用户 TUI 对话的完成简报从未出卡）。"""
+        wid = "w9"
+        # 真实帧序（摘自 swarm_frames.jsonl 录制）：user → user-text → ... → idle(brief)
+        nexus_stub.live_events.append({
+            "roundKey": "mon-ses_f5fd-0E0G0k0C9nEq",
+            "sessionId": "ses_x", "type": "user", "text": "",
+            "messageId": "msg_1",
+        })
+        nexus_stub.live_events.append({
+            "roundKey": "mon-ses_f5fd-0E0G0k0C9nEq",
+            "sessionId": "ses_x", "type": "user-text", "text": "你好",
+        })
+        nexus_stub.live_events.append({
+            "roundKey": "mon-ses_f5fd-0E0G0k0C9nEq",
+            "sessionId": "ses_x", "type": "text",
+            "partId": "p:0", "text": "你好！当前状态速览…",
+        })
+        nexus_stub.live_events.append({
+            "roundKey": "mon-ses_f5fd-0E0G0k0C9nEq",
+            "sessionId": "ses_x", "type": "idle",
+            "brief": {"artifact": "你好！当前状态速览：\n\n- **代码**：dev 分支干净"},
+        })
+        mon = _make_monitor(f"http://127.0.0.1:{nexus_stub.port}", wid)
+        briefs = []
+        mon.brief_ready.connect(lambda k, b: briefs.append(b))
+        assert mon.start() is True
+        try:
+            assert _wait_until(lambda: len(briefs) >= 1), "monitor idle 简报未到"
+            b = briefs[-1]
+            assert b["state"] == "completed"
+            assert b["task_id"] == "mon-ses_f5fd-0E0G0k0C9nEq"
+            assert b["task_first_line"] == "你好"
+            assert b["answer"].startswith("你好！当前状态速览")
+        finally:
+            mon.stop()
+
+    def test_monitor_heartbeat_idle_no_card(self, nexus_stub):
+        """无 brief 且无文本的裸 idle（心跳）不出卡。"""
+        wid = "w9"
+        nexus_stub.live_events.append({"roundKey": "mon-x", "type": "idle"})
+        mon = _make_monitor(f"http://127.0.0.1:{nexus_stub.port}", wid)
+        briefs = []
+        mon.brief_ready.connect(lambda k, b: briefs.append(b))
+        assert mon.start() is True
+        try:
+            assert _wait_until(lambda: nexus_stub.subscribed_wids)
+            import time as _t
+            deadline = _t.monotonic() + 1.5
+            while _t.monotonic() < deadline:
+                pass
+            assert not briefs
+        finally:
+            mon.stop()
+
     def test_unconfigured_rejects_start(self):
         app = QCoreApplication.instance() or QCoreApplication([])
         mon = SwarmMonitor("swarm", _tmp_config_dir())

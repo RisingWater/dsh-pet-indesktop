@@ -157,6 +157,27 @@ def brief_from_status(payload: dict) -> dict | None:
     return None
 
 
+def brief_from_monitor(payload: dict) -> dict | None:
+    """monitor 轮（扁平形状）→ 简报载荷。
+
+    monitor 帧没有 kind 字段：{roundKey, type, text, brief?, ...}。只处理
+    type=idle（轮结束 = completed）；brief.artifact 是服务端注入的回答全文
+    （与 A2A 终态帧的 metadata.brief 同语义），text 兜底。指令首行由
+    _process_payload 的 _task_first_lines 缓存补全（来自 user-text 帧）。
+    """
+    if str(payload.get("type") or "") != "idle":
+        return None
+    brief_meta = payload.get("brief") if isinstance(payload.get("brief"), dict) else {}
+    answer = str(brief_meta.get("artifact") or "") or str(payload.get("text") or "")
+    return {
+        "state": "completed",
+        "task_id": str(payload.get("roundKey") or ""),
+        "task_first_line": "",
+        "answer": answer.strip(),
+        "error": "",
+    }
+
+
 class SwarmMonitor(BaseAgentMonitor):
     """Agent Swarm nexus 监视器（agent_link.swarm 开关驱动）。
 
@@ -453,7 +474,33 @@ class SwarmMonitor(BaseAgentMonitor):
                 # 回放里的 replied：把同请求的缓冲标记已答（幂等）
                 self._replay_answered.add(rid)
             return
-        # ③ 状态与简报
+        # ③ monitor 轮（扁平形状，无 kind/status）：指令首行缓存 + idle 简报
+        mtype_flat = str(payload.get("type") or "")
+        if not str(payload.get("kind") or "") and mtype_flat:
+            round_key = str(payload.get("roundKey") or "")
+            if mtype_flat == "user-text" and round_key and payload.get("text"):
+                # 指令首行：user-text 帧的 text 就是本轮用户指令
+                if round_key not in self._task_first_lines:
+                    self._task_first_lines[round_key] = \
+                        str(payload["text"]).strip().splitlines()[0].strip()[:200]
+                    if len(self._task_first_lines) > 64:
+                        self._task_first_lines.pop(next(iter(self._task_first_lines)))
+                return
+            brief = brief_from_monitor(payload)
+            if brief is not None:
+                if not brief.get("answer") and not brief.get("task_first_line"):
+                    return  # 空简报不出卡（纯心跳 idle）
+                brief = dict(brief, workspace_id=workspace_id)
+                if not brief.get("task_first_line"):
+                    brief["task_first_line"] = self._task_first_lines.get(brief["task_id"], "")
+                log.info("[swarm-brief] monitor brief task=%s answer_len=%s",
+                         brief["task_id"][:12], len(brief["answer"]))
+                self._emit(self.brief_ready, (self.agent_key, brief))
+                self._emit_state("idle", gen)
+                return
+            if mtype_flat in ("permission", "question", "replied", "user", "text"):
+                return  # 其余 monitor 事件由 ② 处理或无需处理，不落 A2A 分支
+        # ④ A2A 状态与简报
         state = str((payload.get("status") or {}).get("state") or "")
         # 指令首行缓存：working 帧的 message 里 role=user 的 text 是任务回显
         #（A2A 轮）；metadata.brief.task_first_line（服务端注入）优先。供终态
