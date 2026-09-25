@@ -34,6 +34,24 @@ from .agent_link import BaseAgentMonitor
 
 log = logging.getLogger("dsh-pet-standalone")
 
+# 原始帧落盘：收到的每条 WS 帧追加写入 JSONL（排查「服务端推了桌宠没收到」
+# 的唯一权威证据，与服务端/web 各自一份对照）。worker 线程内写，无锁竞争。
+_FRAME_LOG = Path.home() / "AppData" / "Roaming" / "dsh-pet-standalone" / "swarm_frames.jsonl"
+
+
+def _record_frame(mtype: str, payload: dict) -> None:
+    """把一条 WS 帧原文追加到 swarm_frames.jsonl（带时间戳，失败静默）。"""
+    try:
+        line = json.dumps(
+            {"ts": __import__("datetime").datetime.now().isoformat(timespec="milliseconds"),
+             "type": mtype, "payload": payload},
+            ensure_ascii=False,
+        )
+        with open(_FRAME_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:  # noqa: BLE001 —— 诊断落盘绝不影响主链路
+        pass
+
 # 终态集合（nexus_a2a TERMINAL_STATES 同口径）
 TERMINAL_STATES = ("completed", "failed", "canceled")
 
@@ -360,6 +378,13 @@ class SwarmMonitor(BaseAgentMonitor):
             elif mtype in ("event", "monitor"):
                 payload = msg.get("payload")
                 if isinstance(payload, dict):
+                    # 原始帧留痕：类型 + 任务标识 + 轮次类型（排查「帧到了没」的唯一依据；
+                    # 只有 received/断线日志时中间链路是黑盒）。文本截断防止日志爆炸。
+                    ptype = str(payload.get("type") or payload.get("kind") or "")
+                    ptask = str(payload.get("taskId") or payload.get("roundKey") or "")
+                    log.info("[swarm-raw] frame type=%s payload.type=%s task=%s",
+                             mtype, ptype, ptask[:12])
+                    _record_frame(mtype, payload)
                     self._process_payload(payload, workspace_id, gen, replay=False)
             elif mtype == "task":
                 task = msg.get("task") or {}
