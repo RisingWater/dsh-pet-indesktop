@@ -245,6 +245,21 @@ def vector_menu_icon(menu: QMenu, name: str, size: int | None = None) -> QIcon:
         painter.setBrush(QBrush(color))
         painter.drawEllipse(QPointF(11.2, 8.0), 1.15, 1.15)
         painter.setBrush(Qt.BrushStyle.NoBrush)
+    elif name == "swarm":
+        # agent_swarm：六只虫体绕中心 AI 核汇聚（官方 logo 的单色矢量版，
+        # 48-unit 设计稿等比缩到 16-unit 画布，除以 3）。
+        for cx, cy, angle in ((8.0, 4.0, 0.0), (11.47, 6.0, 120.0), (11.47, 10.0, 60.0),
+                              (8.0, 12.0, 0.0), (4.53, 10.0, -60.0), (4.53, 6.0, -120.0)):
+            painter.save()
+            painter.translate(cx, cy)
+            painter.rotate(angle)
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(QPointF(0.0, 0.0), 1.4, 1.83)
+            painter.restore()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QPointF(8.0, 8.0), 1.07, 1.07)
+        painter.setBrush(QBrush(color))
+        painter.drawPoint(QPointF(8.0, 8.0))
     elif name == "automation":
         painter.drawLine(QPointF(4.0, 4.0), QPointF(11.8, 7.8))
         painter.drawLine(QPointF(4.0, 12.0), QPointF(11.8, 8.2))
