@@ -332,7 +332,8 @@ class SwarmMonitor(BaseAgentMonitor):
             except Exception as exc:  # noqa: BLE001 —— 断线重连是常态路径
                 if self._stop_async.is_set() or self._emit_gen != gen:
                     return
-                log.debug("swarm ws 断线 (%s): %s", workspace_id[:8], exc)
+                # INFO 级：静默断线曾导致「桌宠收不到帧且日志无痕」的排查盲区
+                log.info("swarm ws 断线 (%s): %s", workspace_id[:8], exc)
             await asyncio.sleep(min(delay, 30.0))
             delay = min(delay * 2, 30.0)
 
