@@ -2285,7 +2285,7 @@ class AgentLinkManager(QObject):
     _exploration_control_result = Signal(str, str, bool, str)
 
     # 联动气泡展示名
-    AGENT_NAMES = {"dsh": "DSH", "claude": "Claude Code", "cursor": "Cursor", "opencode": "OpenCode"}
+    AGENT_NAMES = {"dsh": "DSH", "claude": "Claude Code", "cursor": "Cursor", "opencode": "OpenCode", "swarm": "Agent Swarm"}
     # 过程汇报：工具名 → 用户可读文案（不展示原始命令/路径）
     TOOL_LABELS = {
         "read": "正在读文件", "write": "正在写文件", "edit": "正在改代码",
@@ -2376,6 +2376,14 @@ class AgentLinkManager(QObject):
             "cursor": CursorMonitor(self.config_dir, self),
             "opencode": OpenCodeMonitor(self.config_dir, self),
             }
+        # Agent Swarm（虫群）：网络型监视器（唯一联网联动），连接参数在
+        # apply_config 里从 swarm_config + keyring 注入。惰性导入：模块缺失
+        # （打包漏收 websockets）时不拖垮整个联动系统。
+        try:
+            from .agent_swarm_client import SwarmMonitor
+            self.monitors["swarm"] = SwarmMonitor("swarm", self.config_dir, self)
+        except ImportError:
+            log.warning("agent_swarm_client 不可用，Agent Swarm 联动禁用")
         # 自定义联动 Agent：配置驱动的只读监视器（key/path 已在 config 清洗时
         # 保证合法唯一）；显示名合并进实例级 agent_names，类级 AGENT_NAMES
         # 保持仅内置（modern_settings_dialog 等按内置枚举处不受影响）。
@@ -2432,6 +2440,11 @@ class AgentLinkManager(QObject):
             mon.cordis_requested.connect(self._on_cordis_request)
             mon.cordis_resolved.connect(self._on_cordis_resolved)
             mon.execution_failed.connect(self._on_execution_failed)
+        # swarm 专有信号：连接失败提示与终态简报（仅 SwarmMonitor 实例有）
+        swarm_mon = self.monitors.get("swarm")
+        if swarm_mon is not None and hasattr(swarm_mon, "connection_error"):
+            swarm_mon.connection_error.connect(self._on_swarm_connection_error)
+            swarm_mon.brief_ready.connect(self._on_swarm_brief)
         self.monitors["dsh"].session_meta.connect(self._on_session_meta)
         self.monitors["dsh"].model_access.connect(self._on_model_access)
         self.monitors["dsh"].llm_error.connect(self._on_llm_error)
@@ -2505,6 +2518,23 @@ class AgentLinkManager(QObject):
         set_configured_pnpm_bin(self.cfg.get("pnpm_bin", ""))
         if not agent_cfg.get("dsh", False):
             self._clear_model_access_alerts()
+        # swarm 连接参数注入（URL 来自 swarm_config；apikey 每次 apply_config
+        # 时从 keyring 现读——用户在设置页改 key 后无需重启即生效）。
+        # workspaces=["*"] = 通配订阅属主全部工作区（2026-09-25 简报语义定稿）；
+        # 空/未配置列表拒绝启动（is_configured 门禁）。
+        swarm_mon = self.monitors.get("swarm")
+        if swarm_mon is not None and not isinstance(swarm_mon, DshMonitor):
+            from .agent_swarm_client import SwarmMonitor  # 局部再取类型判别
+            if isinstance(swarm_mon, SwarmMonitor):
+                swarm_cfg = agent_cfg.get("swarm_config") or {}
+                workspaces = [str(w) for w in (swarm_cfg.get("workspaces") or [])]
+                if not workspaces:
+                    workspaces = ["*"]  # 简报语义默认：全部工作区
+                swarm_mon.configure(
+                    str(swarm_cfg.get("server_url") or ""),
+                    self.cfg.resolve_swarm_api_key(),
+                    workspaces,
+                )
         for key, monitor in self.monitors.items():
             should_run = bool(agent_cfg.get(key, False))
             if should_run and not monitor._running:
@@ -3196,6 +3226,9 @@ class AgentLinkManager(QObject):
                 or payload.get("requestId") or payload.get("callId")):
             log.debug("approval/request 缺可关联身份，忽略（不弹窗）: %s", str(payload)[:200])
             return
+        if agent_key == "swarm":
+            self._register_swarm_approval(payload)
+            return
         name = self.AGENT_NAMES.get(agent_key, agent_key)
         tool = str(payload.get("toolName") or payload.get("tool") or "").strip()
         command = str(payload.get("command") or "").strip()
@@ -3240,6 +3273,58 @@ class AgentLinkManager(QObject):
             # （此分支面向旧版/自定义桥的防御路径，常态走 rpcId/approvalId 关闭）。
             call_id=payload.get("callId"),
             session_id=session_id,
+        )
+
+    def _register_swarm_approval(self, payload: dict) -> None:
+        """swarm 审批登记：payload 是 nexus 简报形状（title/patterns/permission）。
+
+        文案优先 patterns（具体路径/命令，与 web 权限卡同源），其次 permission
+        类别、title 说明。requestId 即可交互身份（resolved 配对 + reply 回传）。
+        """
+        name = self.AGENT_NAMES.get("swarm", "Agent Swarm")
+        title = str(payload.get("title") or "").strip()
+        permission = str(payload.get("permission") or "").strip()
+        patterns = [str(p) for p in (payload.get("patterns") or []) if str(p)]
+        detail = "、".join(patterns) if patterns else (title or permission)
+        if detail:
+            formatted = self._format_command(detail)
+            text = f"{name} 请求权限：{formatted}，请选择："
+        else:
+            text = f"{name} 有审批等你决定："
+        self._register_interaction(
+            "swarm", kind="approval", text=text, tool=permission,
+            command=self._format_command(detail) if detail else "",
+            interactive=True,
+            request_id=payload.get("requestId"),
+            workspace_id=payload.get("workspace_id"),
+            task_id=payload.get("task_id"),
+        )
+
+    def _on_swarm_brief(self, agent_key: str, brief: dict) -> None:
+        """swarm 终态简报：任务完成/失败时播一句简报气泡（非阻塞交互）。"""
+        brief = brief if isinstance(brief, dict) else {}
+        state = str(brief.get("state") or "")
+        text = str(brief.get("text") or "").strip()
+        name = self.AGENT_NAMES.get("swarm", "Agent Swarm")
+        if not hasattr(self.win, "show_bubble"):
+            return
+        if state == "failed":
+            body = f"{name} 任务失败了" + (f"：{self._format_command(text, 100)}" if text else "")
+            self.win.show_bubble(body, duration_ms=6000)
+        elif state in ("completed", "canceled"):
+            if text and self._report_allowed(self.cfg.get("agent_link", {}), "done"):
+                self.win.show_bubble(
+                    f"{name} 任务完成：{self._format_command(text, 120)}", duration_ms=5000,
+                )
+
+    def _on_swarm_connection_error(self, agent_key: str, reason: object) -> None:
+        """swarm 注册级失败（hello 被拒：key 无效/工作区无权限）：气泡提示。"""
+        if not hasattr(self.win, "show_bubble"):
+            return
+        name = self.AGENT_NAMES.get("swarm", "Agent Swarm")
+        self.win.show_bubble(
+            f"{name} 连接被拒：{reason}。请在设置里检查 apikey 与工作区配置",
+            duration_ms=6000,
         )
 
     @staticmethod
@@ -3294,8 +3379,13 @@ class AgentLinkManager(QObject):
             return
         payload = payload if isinstance(payload, dict) else {}
         # 可关联身份门禁：rpcId（mux）或 callId（tool/call 兜底）任一非空才登记。
-        if not (payload.get("rpcId") or payload.get("callId")):
+        # swarm 载荷用 requestId 作应答身份（nexus reply 协议），等价可关联。
+        if not (payload.get("rpcId") or payload.get("callId")
+                or (agent_key == "swarm" and payload.get("requestId"))):
             log.debug("question/requested 缺可关联身份，忽略（不弹窗）: %s", str(payload)[:200])
+            return
+        if agent_key == "swarm":
+            self._register_swarm_question(payload)
             return
         name = self.AGENT_NAMES.get(agent_key, agent_key)
         questions = payload.get("questions") or []
@@ -3313,6 +3403,35 @@ class AgentLinkManager(QObject):
             rpc_id=payload.get("rpcId"),
             call_id=payload.get("callId"),
             session_id=session_id,
+        )
+
+    def _register_swarm_question(self, payload: dict) -> None:
+        """swarm 提问登记：payload 是 nexus 简报形状（question/options 顶层平铺）。
+
+        nexus 单轮一个问题（web 同款），包装成内部 questions[1] 形状复用
+        现有气泡按钮渲染（_question_buttons）；requestId 即应答身份。
+        """
+        name = self.AGENT_NAMES.get("swarm", "Agent Swarm")
+        body = str(payload.get("question") or payload.get("title") or "").strip()
+        options = [
+            {"label": str(o.get("label") or "")}
+            for o in (payload.get("options") or [])
+            if isinstance(o, dict) and str(o.get("label") or "")
+        ]
+        questions = [{"id": 0, "question": body or "（问题）", "options": options}]
+        if body:
+            text = f"{name} 在问你：{body}" + (
+                f"（{' / '.join(o['label'] for o in options)}）" if options else ""
+            ) + "请选择一个："
+        else:
+            text = f"{name} 在等你回答一个问题，快去看一下～"
+        self._register_interaction(
+            "swarm", kind="question", text=text,
+            questions=questions,
+            interactive=bool(options),
+            request_id=payload.get("requestId"),
+            workspace_id=payload.get("workspace_id"),
+            task_id=payload.get("task_id"),
         )
 
     def _question_text(self, name: str, questions: list, *, prefix: str = "",
@@ -3726,12 +3845,18 @@ class AgentLinkManager(QObject):
         }
 
     def _respond_interaction(self, interaction_id: str, decision) -> None:
-        """交互按钮点选后回写 DSH：后台线程 POST /api/respond，绝不阻塞主线程。
+        """交互按钮点选后回写：后台线程 POST，绝不阻塞主线程。
 
         decision：审批为 "allowed-once"/"rejected"；问题为选中的选项 label 列表。
-        以 interaction_id 精确定位，只对该条交互回写并关闭。"""
+        以 interaction_id 精确定位，只对该条交互回写并关闭。
+        按 agent 分流：DSH 走本地 /api/respond（dsh_responder）；
+        swarm 走 nexus /api/nexus/{wid}/reply（swarm_responder，Bearer apikey）。
+        """
         pending = self._pending_interactions.get(interaction_id)
         if not pending:
+            return
+        if str(pending.get("agent_key") or "") == "swarm":
+            self._respond_swarm_interaction(pending, decision)
             return
         msg = self._build_respond_message(pending, decision)
         if msg is None:
@@ -3781,6 +3906,47 @@ class AgentLinkManager(QObject):
             except ValueError:
                 pass
         return sorted(ports)
+
+    def _respond_swarm_interaction(self, pending: dict, decision) -> None:
+        """swarm 交互回写：构造 nexus reply 载荷，交 SwarmMonitor 队列发送。
+
+        决策值映射：同意 → once；拒绝 → reject；问题 → 选项 label 二维数组
+        （web 同款 string[][]，单问题单选即 [[label]]）。气泡立即收起；
+        409 先答先算由 monitor 内部静默处置。"""
+        mon = self.monitors.get("swarm")
+        if mon is None or not hasattr(mon, "submit_reply"):
+            return
+        kind = str(pending.get("kind") or "")
+        request_id = str(pending.get("request_id") or "")
+        workspace_id = str(pending.get("workspace_id") or "")
+        task_id = str(pending.get("task_id") or "")
+        if not (request_id and workspace_id):
+            return
+        if kind == "approval":
+            permission_reply = "reject" if str(decision) == "rejected" else "once"
+            mon.submit_reply(
+                workspace_id=workspace_id, task_id=task_id, kind="permission",
+                request_id=request_id, permission_reply=permission_reply,
+            )
+        elif kind == "question":
+            if isinstance(decision, dict) and isinstance(decision.get("answers"), (list, tuple)):
+                # 结构化多问回答：按问题顺序取 selected label
+                answers: list[list[str]] = []
+                questions = pending.get("questions") or []
+                for index, q in enumerate(questions):
+                    q = q if isinstance(q, dict) else {}
+                    entry = decision["answers"][index] if index < len(decision["answers"]) else {}
+                    selected = entry.get("selected") if isinstance(entry, dict) else []
+                    answers.append([str(s) for s in (selected or [])])
+                if not any(answers):
+                    return
+            else:
+                selected = decision if isinstance(decision, (list, tuple)) else [decision]
+                answers = [[str(s) for s in selected]]
+            mon.submit_reply(
+                workspace_id=workspace_id, task_id=task_id, kind="question",
+                request_id=request_id, answers=answers,
+            )
 
     def _on_respond_result(self, ok: bool, detail: str) -> None:
         """DSH 回写结果：成功静默（resolved 帧收尾）；失败提示到 DSH 界面处理。"""

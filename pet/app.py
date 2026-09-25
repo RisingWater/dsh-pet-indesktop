@@ -1432,6 +1432,13 @@ class AppShell:
             refresh = getattr(inst, "_refresh_chat_windows", None)
             if callable(refresh):
                 refresh()
+        # Agent 联动：独立设置进程保存后同步监视器启停（swarm 连接参数/开关、
+        # 内置 Agent 开关都走这里；进程内对话框路径经 _modern_settings_finished
+        # 汇入本方法，同一份配置重放 apply_config 幂等）。
+        for inst in getattr(self, "_instances", []):
+            manager = getattr(inst.win, "agent_link_manager", None)
+            if manager is not None:
+                manager.apply_config()
         _mac_set_dock_icon_visible(bool(self.config.get("show_dock_icon", True)))
 
     def open_settings_process(self, instance=None, page: str | None = None) -> bool:

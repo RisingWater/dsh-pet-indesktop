@@ -202,7 +202,11 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 打包变体不再展示该死路开关（运行时回退在 pet/dynamic_island.py 的
 # chat_available）。实测 2357；按文件约定只随实测校准，不为达标压行。
 # 2026-09-24：新增独立更新页后仅保留导航/深链/版本页脚接线，更新页主体已拆到 pet/update_settings.py。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2383
+# 2026-09-25 上调到 2428：Agent Swarm（虫群）联动接入「Agent 联动」折叠框——
+# swarm_rows 5 个 SettingRow + _swarm_test_widget 组合控件 + 3 个接线方法 +
+# _write_config 一行合并写回；控件本体与实现全在 pet/settings_pet_controls.py。
+# 实测 2428；按文件约定只随实测校准，不为达标压行。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2428
 
 
 def _read(name: str) -> str:

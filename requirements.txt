@@ -21,6 +21,13 @@ lunar-python>=1.4.8
 # 存在动态导入，PyInstaller 静态分析收不全）。
 edge-tts>=6.1.10
 
+# Agent Swarm 联动（pet/agent_swarm_client.py）的 WS 订阅：连接 nexus 服务器
+# /ws/nexus（hello apikey 鉴权），按简报模式收权限/提问/任务事件并代为应答。
+# 缺失时 SwarmMonitor 拒绝启动并降级为不可用（不崩溃），但打包版用户无法自行
+# pip 安装——与 edge-tts 同理声明为运行时依赖。纯 Python，PyInstaller 静态
+# 分析可完整收集。
+websockets>=13
+
 # —— 歌词显示（可选）——
 # 「显示歌词」功能靠 Windows 系统媒体控制（SMTC）读取当前播放的曲目。
 # 不装不影响桌宠本体：歌词能力探测返回不可用，

@@ -1423,6 +1423,27 @@ class ModernSettingsDialog(QDialog):
             vol = float(self.click_sound_volume_spin.value()) / 100.0
             play_sound(sound_file, volume=vol)
 
+    def _swarm_test_widget(self) -> QWidget:
+        """「测试连接 + 刷新工作区 + 状态提示」组合控件（构建一次复用）。"""
+        cached = getattr(self, "_swarm_test_row_widget", None)
+        if cached is not None:
+            return cached
+        container = QWidget(self)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.addWidget(self.swarm_test_btn)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        layout.addWidget(self.swarm_status_label)
+        self._swarm_test_row_widget = container
+        return container
+
+    def _swarm_test_connection(self) -> None:
+        settings_pet_controls._swarm_test_connection(self)
+
     def _preview_agent_sound(self, event_name: str) -> None:
         """试听当前填写的 Agent 音效（不保存配置、不触发 Agent 业务逻辑）。"""
         from .click_sound import play_sound, resolve_builtin_sound
@@ -1880,6 +1901,8 @@ class ModernSettingsDialog(QDialog):
         automation_layout = automation.layout()
         # 「Agent 联动」＝两级结构：折叠框下按用途分子组（消费统计 / 提示音效）。
         # 用现成的 CollapsibleGroup.add_group，不需要新造控件。
+        # Agent Swarm 不在此页：独立成「Agent Swarm」域（2026-09-25 用户决策——
+        # 虫群有独立的连接配置/简报语义，塞在自动化里混乱；见 SETTINGS_DOMAIN_NAV）。
         agent_box = CollapsibleGroup("Agent 联动", automation)
         agent_cost_rows = [
             SettingRow("agent_cost", "显示本轮消费",
@@ -1935,6 +1958,25 @@ class ModernSettingsDialog(QDialog):
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。
         file_interpret = settings_file_interpret.build_file_interpret_page(self)
 
+        # 「Agent Swarm」域（2026-09-25 新增）：虫群连接与简报设置独立成页
+        # （用户决策：塞在「自动化与联动」里混乱）。行在本方法内构建，
+        # 控件本体在 settings_pet_controls（与其他设置控件同处）。
+        swarm_rows = [
+            SettingRow("swarm_enabled", "Agent Swarm 联动",
+                       "以 web 客户端身份接入 agent_swarm nexus：接收任务简报，"
+                       "代答权限/提问（与其他渠道先答先算）。默认关闭。",
+                       self.swarm_enabled_check),
+            SettingRow("swarm_url", "服务器地址", "agent_swarm 服务器 URL（含端口）。", self.swarm_url_edit),
+            SettingRow("swarm_key", "API Key", "账号页生成的 API Key（存系统钥匙串，不落盘）。", self.swarm_key_edit),
+            SettingRow("swarm_test", "测试连接", "用当前地址与 Key 验证连通性。",
+                       self._swarm_test_widget()),
+            SettingRow("swarm_scope", "简报范围",
+                       "你账号下的全部工作区（与飞书/微信简报一致，新工作区自动纳入）。",
+                       self.swarm_scope_label),
+        ]
+        claimed.update(swarm_rows)
+        swarm_page = page_content([("连接与简报", swarm_rows)])
+
         # Preserve any newly added row until it receives an explicit domain decision.
         leftovers = [row for row in all_rows if row not in claimed and (self.ai_page is None or not self.ai_page.isAncestorOf(row))]
         if leftovers:
@@ -1952,6 +1994,7 @@ class ModernSettingsDialog(QDialog):
             "桌面组件": desktop_components,
             "AI 与对话": ai_sections,
             "自动化与联动": automation,
+            "Agent Swarm": swarm_page,
             "语音": voice,
             "文件识别": file_interpret,
             "更新": self.update_page,
@@ -2226,6 +2269,8 @@ class ModernSettingsDialog(QDialog):
         # 循环检测设置页（合并写回，不覆盖 agent_link 其他字段）
         if self.watchdog_page is not None:
             agent_cfg = self.watchdog_page.apply_to_config(agent_cfg)
+        # Agent Swarm（虫群）：开关/URL/工作区 + apikey 写 keyring（合并写回）
+        agent_cfg = settings_pet_controls._swarm_apply_to_config(self, agent_cfg)
 
         # Agent 联动音效写回
         agent_cfg["sound_enabled"] = self.agent_sound_check.isChecked()

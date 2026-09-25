@@ -344,6 +344,7 @@ def add_agent_link_menu(menu: QMenu, pet) -> None:
         ('claude', 'Claude Code'),
         ('cursor', 'Cursor'),
         ('opencode', 'OpenCode'),
+        ('swarm', 'Agent Swarm'),
     ):
         act = sub.addAction(agent_label)
         act.setCheckable(True)

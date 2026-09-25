@@ -317,6 +317,8 @@ class TestAgentLinkManager:
             "claude": False,
             "cursor": False,
             "opencode": False,
+            "swarm": False,
+            "swarm_config": {"server_url": "", "workspaces": []},
             "custom_agents": [],
             "report_gates": {
                 "state": 1.0,

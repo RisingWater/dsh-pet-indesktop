@@ -12,6 +12,7 @@ import sys
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
@@ -433,6 +434,40 @@ def build_pet_controls(host) -> None:
     host.agent_sound_check = ToggleSwitch(host)
     host.agent_sound_check.setChecked(bool(agent_link_cfg.get("sound_enabled", False)))
 
+    # —— Agent Swarm（虫群）联动控件 ——
+    # 服务器 URL 存 agent_link.swarm_config；apikey 存 keyring（SecretStore
+    # 模式），设置页显示掩码占位而非明文。工作区不做勾选：简报语义 =
+    # 「属主全部工作区」（与飞书/微信渠道对齐），内部存 ["*"] 通配 id，
+    # 由服务端按 _owns 过滤推送；测试连接只验证 URL + apikey 连通性。
+    swarm_cfg = agent_link_cfg.get("swarm_config")
+    if not isinstance(swarm_cfg, dict):
+        swarm_cfg = {}
+    host.swarm_enabled_check = ToggleSwitch(host)
+    host.swarm_enabled_check.setChecked(bool(agent_link_cfg.get("swarm", False)))
+    host.swarm_url_edit = QLineEdit(host)
+    host.swarm_url_edit.setPlaceholderText("http://127.0.0.1:8700")
+    host.swarm_url_edit.setText(str(swarm_cfg.get("server_url") or ""))
+    host.swarm_url_edit.setMinimumWidth(220)
+    host.swarm_key_edit = QLineEdit(host)
+    host.swarm_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+    host.swarm_key_edit.setPlaceholderText(
+        "已保存（重输可更换）" if host.config.resolve_swarm_api_key() else "as_ 开头的账号页 API Key"
+    )
+    if host.config.resolve_swarm_api_key():
+        host.swarm_key_edit.setToolTip("apikey 已存入系统钥匙串；留空保持不变，重输则覆盖")
+    host.swarm_test_btn = QPushButton("测试连接", host)
+    host.swarm_test_btn.setFixedWidth(88)
+    host.swarm_test_btn.clicked.connect(host._swarm_test_connection)
+    host.swarm_status_label = QLabel("", host)
+    host.swarm_status_label.setObjectName("settingHint")
+    host.swarm_status_label.setWordWrap(True)
+    host.swarm_scope_label = QLabel(
+        "简报范围：你账号下的全部工作区（与飞书/微信简报一致；新注册的工作区自动纳入）",
+        host,
+    )
+    host.swarm_scope_label.setObjectName("settingHint")
+    host.swarm_scope_label.setWordWrap(True)
+
     # 辅助构建包含“开关+路径选择+试听”的组合控件
     def _build_agent_event_row(evt_key: str, default_builtin: str) -> tuple[QWidget, ToggleSwitch, ResourcePathPicker, QPushButton]:
         toggle = ToggleSwitch(host)
@@ -771,3 +806,77 @@ def _import_dialogue_template_json(host) -> None:
             }
     host.dialogue_template_import_edit.clear()
     QMessageBox.information(host, "导入成功", "已导入全部弹窗内容模板；点击“保存并退出”后生效。")
+
+
+# ---------------------------------------------------------------------------
+# Agent Swarm（虫群）联动：测试连接 / 工作区列表 / 保存辅助
+# ---------------------------------------------------------------------------
+
+def _swarm_credentials(host) -> tuple[str, str]:
+    """读取当前填写的 (server_url, api_key)。
+
+    apikey 输入框为空 = 沿用已存 keyring 的 key（不回显明文）；填了新值则
+    以新值本次生效并写回 keyring（apply 时）。"""
+    url = host.swarm_url_edit.text().strip().rstrip("/")
+    key = host.swarm_key_edit.text().strip()
+    if not key:
+        key = host.config.resolve_swarm_api_key()
+    return url, key
+
+
+def _swarm_test_connection(host) -> None:
+    """用当前表单值打一次 /api/workspaces：验证 URL + apikey 是否可用（阻塞
+
+    线程内短超时，设置页可接受；跟随系统代理，与 chat 同口径）。"""
+    url, key = _swarm_credentials(host)
+    if not url or not key:
+        host.swarm_status_label.setText("请先填写服务器地址与 apikey")
+        return
+    host.swarm_status_label.setText("正在测试连接…")
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"{url}/api/workspaces",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            import json as _json
+
+            data = _json.loads(resp.read(65536).decode("utf-8", "replace"))
+        items = data if isinstance(data, list) else (data.get("workspaces") or [])
+        online = sum(
+            1 for w in items if isinstance(w, dict) and str(w.get("status") or "") == "online"
+        )
+        host.swarm_status_label.setText(
+            f"连接成功（HTTP {resp.status}）；你名下 {len(items)} 个工作区（在线 {online}）都在简报范围内"
+        )
+    except Exception as exc:  # noqa: BLE001
+        detail = str(exc)
+        code = getattr(exc, "code", None)
+        if code in (401, 403):
+            detail = "apikey 无效或无权限"
+        host.swarm_status_label.setText(f"连接失败：{detail}")
+
+
+def _swarm_apply_to_config(host, agent_cfg: dict) -> dict:
+    """把 swarm 控件状态写进 agent_link 字典（保存时调用）。
+
+    apikey 非空时写入 keyring（SecretStore 模式）；写失败（keyring 不可用）
+    时放入内存态 config 供本次运行使用（_redacted_data 保证不落盘）。
+    工作区固定 ["*"] 通配（属主全部，服务端过滤推送）。"""
+    from .chat.models import SecretStore
+    from .config import _clean_swarm_config
+
+    url = host.swarm_url_edit.text().strip().rstrip("/")
+    swarm_cfg = {"server_url": url, "workspaces": ["*"]}
+    new_key = host.swarm_key_edit.text().strip()
+    if new_key:
+        store = SecretStore()
+        if store.set("swarm_api_key", new_key):
+            swarm_cfg["api_key_ref"] = "swarm_api_key"
+        else:
+            swarm_cfg["api_key"] = new_key  # 仅内存；不落盘
+    agent_cfg["swarm"] = bool(host.swarm_enabled_check.isChecked())
+    agent_cfg["swarm_config"] = _clean_swarm_config(swarm_cfg)
+    return agent_cfg

@@ -237,6 +237,10 @@ def _default_agent_link_data() -> dict:
         "claude": False,
         "cursor": False,
         "opencode": False,
+        # Agent Swarm（虫群）联动总开关：网络型监视器（唯一允许联网的联动），
+        # 默认关；apikey 只存 keyring，服务器 URL 与勾选的工作区在 swarm_config
+        "swarm": False,
+        "swarm_config": {"server_url": "", "workspaces": []},
         # 自定义联动 Agent（协议见 docs/AGENT_LINK_PROTOCOL.md §4）：只读监听
         # 用户指定的事件文件，不写外部配置、无需授权弹窗，默认空
         "custom_agents": [],
@@ -310,9 +314,50 @@ def _clean_click_sound_pack(value: Any) -> dict:
 
 
 # 内置联动 Agent 键：custom_agents 的 key 不得与之重复
-_AGENT_LINK_BUILTIN_KEYS = ("dsh", "claude", "cursor", "opencode")
+_AGENT_LINK_BUILTIN_KEYS = ("dsh", "claude", "cursor", "opencode", "swarm")
 # 自定义联动 Agent 条目上限（防配置文件被塞爆）
 _CUSTOM_AGENT_MAX = 8
+# agent_link.swarm 勾选的工作区 id 上限（一个工作区一条 WS，防配置被塞爆）
+_SWARM_WORKSPACES_MAX = 8
+
+
+def _clean_swarm_config(raw: Any) -> dict:
+    """清洗 agent_link.swarm_config 块（server_url / workspaces）。
+
+    - server_url：只收 http/https（swarm 服务器是 REST+WS 双通道，ws(s) 由客户端
+      从 http(s) 推导）；其他 scheme 一律回退空串。
+    - workspaces：字符串 id 列表，去空白、丢空/非串、去重、截断到上限。
+      **语义（2026-09-25 定稿）**：简报范围 = 属主全部工作区（与飞书/微信渠道
+      对齐），独立设置页保存时写 ["*"] 通配 id；此处只做形状清洗，不再做
+      逐工作区挑选（旧版逐 wid 勾选列表已移除，旧配置里的 wid 列表原样保留
+      也不影响——SwarmMonitor 对非 "*" 列表按多连接订阅处理，行为向后兼容）。
+    - **apikey/secret/token 类字段一律不收**：密钥只进 keyring（SecretStore 模式），
+      config.json 里永不落明文——清洗即丢弃，防止外部写入把密钥带进磁盘。
+    """
+    defaults = {"server_url": "", "workspaces": []}
+    if not isinstance(raw, dict):
+        return dict(defaults)
+    url = str(raw.get("server_url") or "").strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        url = ""
+    if url:
+        # 剥尾部斜杠：WS 地址由客户端拼接 "/ws/nexus"，避免出现 "//ws"
+        url = url.rstrip("/")
+    if len(url) > 500:
+        url = url[:500]
+    workspaces: list[str] = []
+    seen: set[str] = set()
+    for item in raw.get("workspaces") or []:
+        if not isinstance(item, str):
+            continue
+        wid = item.strip()
+        if not wid or wid in seen:
+            continue
+        seen.add(wid)
+        workspaces.append(wid)
+        if len(workspaces) >= _SWARM_WORKSPACES_MAX:
+            break
+    return {"server_url": url, "workspaces": workspaces}
 
 
 def _clean_custom_agents(raw: Any) -> list[dict]:
@@ -352,11 +397,13 @@ def _clean_agent_link_data(raw: Any) -> dict:
     # 保留传入的额外合法键（例如 thinking_text, thinking_texts 等）
     result.update(raw)
     result["custom_agents"] = _clean_custom_agents(raw.get("custom_agents"))
+    result["swarm_config"] = _clean_swarm_config(raw.get("swarm_config"))
     for key in (
         "dsh",
         "claude",
         "cursor",
         "opencode",
+        "swarm",
         "sound_enabled",
         "sound_start_enabled",
         "sound_done_enabled",
@@ -1558,6 +1605,14 @@ class Config:
         from .chat.models import SecretStore
 
         return SecretStore().get(provider.api_key_ref) or provider.api_key
+
+    def resolve_swarm_api_key(self) -> str:
+        """Agent Swarm apikey：keyring 优先，回退内存态（_redacted_data 保证不落盘）。"""
+        from .chat.models import SecretStore
+
+        swarm_cfg = (self.data.get("agent_link") or {}).get("swarm_config") or {}
+        ref = str(swarm_cfg.get("api_key_ref") or "swarm_api_key")
+        return SecretStore().get(ref) or str(swarm_cfg.get("api_key") or "")
 
     def _redacted_data(self) -> dict:
         """深拷贝待写盘数据，并剔除 chat.providers 下的明文 API Key。
