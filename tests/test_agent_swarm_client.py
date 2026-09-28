@@ -156,13 +156,21 @@ class TestBriefFromStatus:
 # 3. AgentLinkManager 集成（swarm payload → 气泡/应答分流）
 # ============================================================================
 class TestManagerSwarmIntegration:
-    def _make_manager(self, tmp_path):
+    def _make_manager(self, tmp_path, monkeypatch=None):
         import pytest as _pytest
         from pet.agent_link import AgentLinkManager
         from pet.config import Config
 
         cfg = Config(base=tmp_path)
         mgr = AgentLinkManager(None, cfg)
+        if monkeypatch is not None:
+            # 本类各测试写的是「降级 alert 路径」的契约（interactive=True /
+            # show_alert 被调）。同进程里其它测试文件（如
+            # test_bubble_text_scale）先建出 QApplication 时，_swarm_bubble()
+            # 会构造真 SwarmBubble 走主路径，与文件内既有桩（223 行
+            # monkeypatch.setattr(mgr, "_swarm_bubble", lambda: None)）语义
+            # 不一致——统一在这里掐掉，测试不再依赖文件执行顺序。
+            monkeypatch.setattr(mgr, "_swarm_bubble", lambda: None)
         return cfg, mgr
 
     def test_swarm_monitor_registered(self, tmp_path):
@@ -171,8 +179,8 @@ class TestManagerSwarmIntegration:
         assert mgr.agent_names["swarm"] == "Agent Swarm"
         mgr.shutdown()
 
-    def test_swarm_approval_payload_registers_interaction(self, tmp_path):
-        cfg, mgr = self._make_manager(tmp_path)
+    def test_swarm_approval_payload_registers_interaction(self, tmp_path, monkeypatch):
+        cfg, mgr = self._make_manager(tmp_path, monkeypatch)
         mgr._on_approval_request("swarm", {
             "type": "permission", "requestId": "p1", "workspace_id": "w1",
             "task_id": "T1", "title": "bash 权限",
@@ -188,8 +196,8 @@ class TestManagerSwarmIntegration:
         assert item["interactive"] is True
         mgr.shutdown()
 
-    def test_swarm_question_payload_registers_interaction(self, tmp_path):
-        cfg, mgr = self._make_manager(tmp_path)
+    def test_swarm_question_payload_registers_interaction(self, tmp_path, monkeypatch):
+        cfg, mgr = self._make_manager(tmp_path, monkeypatch)
         mgr._on_question_request("swarm", {
             "type": "question", "requestId": "q1", "workspace_id": "w1",
             "task_id": "T2", "question": "选哪个部署方案？",
@@ -249,8 +257,8 @@ class TestManagerSwarmIntegration:
         assert card["buttons"] is None
         mgr.shutdown()
 
-    def test_swarm_brief_failed_shows_error(self, tmp_path):
-        cfg, mgr = self._make_manager(tmp_path)
+    def test_swarm_brief_failed_shows_error(self, tmp_path, monkeypatch):
+        cfg, mgr = self._make_manager(tmp_path, monkeypatch)
         alerts = []
 
         class _Win:
@@ -268,9 +276,9 @@ class TestManagerSwarmIntegration:
         assert "❌ 任务失败" in subtitle
         assert "失败原因：boom" in text
 
-    def test_swarm_brief_canceled_card(self, tmp_path):
+    def test_swarm_brief_canceled_card(self, tmp_path, monkeypatch):
         """canceled 出「⏹️ 任务已取消」常驻卡（用户手动取消也要有反馈）。"""
-        cfg, mgr = self._make_manager(tmp_path)
+        cfg, mgr = self._make_manager(tmp_path, monkeypatch)
         alerts = []
 
         class _Win:
@@ -302,9 +310,9 @@ class TestManagerSwarmIntegration:
         assert "run.ps1" in item["text"]
         mgr.shutdown()
 
-    def test_swarm_approval_three_buttons(self, tmp_path):
+    def test_swarm_approval_three_buttons(self, tmp_path, monkeypatch):
         """swarm 审批卡三按钮：同意 / 本会话允许 / 拒绝（对齐飞书 perm_card）。"""
-        cfg, mgr = self._make_manager(tmp_path)
+        cfg, mgr = self._make_manager(tmp_path, monkeypatch)
         mgr._on_approval_request("swarm", {
             "type": "permission", "requestId": "p3", "workspace_id": "w1",
             "task_id": "T1", "title": "x",

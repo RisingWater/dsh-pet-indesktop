@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -42,6 +42,20 @@ CARD_SPACING = 10
 
 # 文本截断上限（与 agent_link 的简报语义一致）
 TASK_FIRST_MAX = 200
+
+# 竖滚动条预留宽度：_apply_theme 里 QScrollBar:vertical 定宽 7px，与其保持一致
+_VSCROLL_RESERVE = 7
+
+# 边缘拖拽热区厚度（px）：四边与四角在此范围内触发改变大小光标/拖拽
+RESIZE_GRIP = 8
+
+# 用户手拉大小的界限：下限取权限小卡基准（再小内容就不可读了），
+# 上限放宽到基准 3 倍宽 / 4 倍高——自由调整大小后旧「2 倍封顶」不再合理，
+# 大屏用户需要更大的简报卡；超出仍由屏幕可用区收口兜底。
+MIN_BUBBLE_W = 274
+MIN_BUBBLE_H = 180
+MAX_BUBBLE_W = 274 * 3
+MAX_BUBBLE_H = 180 * 4
 
 
 def _menu_text_color(widget: QWidget) -> str:
@@ -98,6 +112,12 @@ class SwarmBubble(QWidget):
         self._max_w = self._base_w * 2
         self._max_h = self._base_h * 2
 
+        # —— 边缘拖拽改变大小（用户要求：气泡可自由调整尺寸）——
+        self._resize_edge = 0          # 拖拽中的边/角掩码（Qt.Edge 组合）
+        self._resize_start_global = QPoint()
+        self._resize_start_geom = QRect()
+        self.setMouseTracking(True)    # 悬停即探测边缘（不按键也要收 move 事件）
+
         # —— 白底卡片视觉（visual-system 卡片契约）——
         self._card = QFrame(self)
         self._card.setObjectName("swarm-bubble-card")
@@ -125,10 +145,15 @@ class SwarmBubble(QWidget):
         self._body.setOpenExternalLinks(False)
         self._body.setFrameShape(QFrame.Shape.NoFrame)
         self._body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # 横向永不出滚动条（用户要求）：代码块/超长 token 把文档理想宽撑得
+        # 比视口宽时，宁可折行/裁剪也不横向滚——竖滚动条出现再挤掉 7px 宽度，
+        # 文档重排变宽的连锁反应也会被掐断在源头。
+        self._body.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._body.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
         layout.addWidget(self._body, 1)
 
-        # ④ 按钮行：「知道了」
-        btn_row = QHBoxLayout(self._card)
+        # ④ 按钮行：「知道了」（不带 parent：_card 已有 layout，二次安装会告警）
+        btn_row = QHBoxLayout()
         btn_row.addStretch(1)
         self._ok_btn = QPushButton("知道了", self._card)
         self._ok_btn.setObjectName("swarm-bubble-ok")
@@ -222,8 +247,113 @@ class SwarmBubble(QWidget):
         self._popup(anchor_rect)
 
     def _resize_to(self, width: int, height: int) -> None:
-        self._body.setFixedWidth(width - CARD_MARGIN * 2)
-        self.setFixedSize(width, height)
+        # 预扣竖滚动条宽度：ScrollbarAsNeeded 下滚动条出现会把视口挤窄、文档
+        # 重排，个别内容（代码块）会借机横向溢出；固定宽一开始就留出 7px，
+        # 滚动条出现前后视口宽度不变，杜绝那条连锁路径（用户要求无横向滚动）。
+        self._body.setFixedWidth(width - CARD_MARGIN * 2 - _VSCROLL_RESERVE)
+        # 最小尺寸兜底（用户拖得过小），最大不设死——自由拖拽大小由
+        # _perform_resize 的钳位与屏幕收口负责（用户要求：可自由改变大小）。
+        self._body.setMinimumWidth(MIN_BUBBLE_W - CARD_MARGIN * 2 - _VSCROLL_RESERVE)
+        self.setMinimumSize(MIN_BUBBLE_W, MIN_BUBBLE_H)
+        self.resize(width, height)
+
+    # ------------------------------------------------------------ 边缘拖拽改变大小
+
+    def _edges_at(self, pos: QPoint) -> int:
+        """pos（本窗口坐标）落在哪些边/角上；返回 Qt.Edge 组合，0 = 不在热区。"""
+        edges = 0
+        if pos.x() <= RESIZE_GRIP:
+            edges |= Qt.Edge.LeftEdge.value
+        if pos.x() >= self.width() - RESIZE_GRIP:
+            edges |= Qt.Edge.RightEdge.value
+        if pos.y() <= RESIZE_GRIP:
+            edges |= Qt.Edge.TopEdge.value
+        if pos.y() >= self.height() - RESIZE_GRIP:
+            edges |= Qt.Edge.BottomEdge.value
+        return edges
+
+    _CURSORS = {
+        Qt.Edge.LeftEdge.value: Qt.CursorShape.SizeHorCursor,
+        Qt.Edge.RightEdge.value: Qt.CursorShape.SizeHorCursor,
+        Qt.Edge.TopEdge.value: Qt.CursorShape.SizeVerCursor,
+        Qt.Edge.BottomEdge.value: Qt.CursorShape.SizeVerCursor,
+        Qt.Edge.LeftEdge.value | Qt.Edge.TopEdge.value: Qt.CursorShape.SizeFDiagCursor,
+        Qt.Edge.RightEdge.value | Qt.Edge.BottomEdge.value: Qt.CursorShape.SizeFDiagCursor,
+        Qt.Edge.LeftEdge.value | Qt.Edge.BottomEdge.value: Qt.CursorShape.SizeBDiagCursor,
+        Qt.Edge.RightEdge.value | Qt.Edge.TopEdge.value: Qt.CursorShape.SizeBDiagCursor,
+    }
+
+    def _cursor_for(self, edges: int):
+        return self._CURSORS.get(edges)
+
+    def mousePressEvent(self, event) -> None:   # noqa (Qt naming)
+        if event.button() == Qt.MouseButton.LeftButton:
+            edges = self._edges_at(event.position().toPoint())
+            if edges:
+                self._resize_edge = edges
+                self._resize_start_global = event.globalPosition().toPoint()
+                self._resize_start_geom = QRect(self.pos(), self.size())
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:   # noqa (Qt naming)
+        pos = event.position().toPoint()
+        if self._resize_edge:
+            self._perform_resize(event.globalPosition().toPoint())
+            event.accept()
+            return
+        cursor = self._cursor_for(self._edges_at(pos))
+        self.setCursor(cursor) if cursor else self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:   # noqa (Qt naming)
+        if self._resize_edge:
+            self._resize_edge = 0
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _perform_resize(self, global_pos: QPoint) -> None:
+        """按拖拽位移计算新几何：左/上边移动原点并缩尺寸，右/下边只缩尺寸；
+        钳位到 MIN/MAX 后对超出部分回弹原点（拖左/上边时不让窗口平移）。"""
+        d = global_pos - self._resize_start_global
+        e = self._resize_edge
+        left, top = bool(e & Qt.Edge.LeftEdge.value), bool(e & Qt.Edge.TopEdge.value)
+        right, bottom = bool(e & Qt.Edge.RightEdge.value), bool(e & Qt.Edge.BottomEdge.value)
+
+        new_w = self._resize_start_geom.width()
+        new_h = self._resize_start_geom.height()
+        dx = d.x()
+        dy = d.y()
+        if right:
+            new_w += dx
+        if left:
+            new_w -= dx
+        if bottom:
+            new_h += dy
+        if top:
+            new_h -= dy
+
+        # 钳位，并记录被截断的量用于回弹原点
+        clamped_w = max(MIN_BUBBLE_W, min(MAX_BUBBLE_W, new_w))
+        clamped_h = max(MIN_BUBBLE_H, min(MAX_BUBBLE_H, new_h))
+
+        x = self._resize_start_geom.x()
+        y = self._resize_start_geom.y()
+        if left:
+            x += self._resize_start_geom.width() - clamped_w
+        if top:
+            y += self._resize_start_geom.height() - clamped_h
+
+        self.setGeometry(x, y, clamped_w, clamped_h)
+        # body 固定宽跟随（card margin + 滚动条预留），高度交给 layout 分配
+        self._body.setFixedWidth(clamped_w - CARD_MARGIN * 2 - _VSCROLL_RESERVE)
+
+    def leaveEvent(self, event) -> None:   # noqa (Qt naming)
+        if not self._resize_edge:
+            self.unsetCursor()
+        super().leaveEvent(event)
 
     def _popup(self, anchor_rect) -> None:
         """锚点上方居中弹出 + 屏幕边界收口（四周 SCREEN_PADDING）。
