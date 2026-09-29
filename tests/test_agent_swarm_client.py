@@ -223,6 +223,69 @@ class TestManagerSwarmIntegration:
         assert mgr.pending_interactions_for("swarm") == {}
         mgr.shutdown()
 
+    def test_swarm_notice_shown_never_enqueues_alert(self, tmp_path):
+        """权限/提问小卡主路径：SwarmBubble 已弹出时严禁再挂 alert 队列。
+
+        用户报告（2026-09-29）：同一权限申请同屏弹出「新小卡 + 旧大卡」，
+        旧大卡 interactive=False 无按钮还关不掉——根源是 _register_interaction
+        尾部无脑 _show_interaction_bubble(iid)，把 notice_shown=True 的记录
+        又 enqueue 成 sticky alert。小卡是它的唯一呈现层。
+
+        注意不能用 _make_manager（它统一 stub 掉 _swarm_bubble 走降级路径），
+        本测试要的恰恰是主路径，手动注入真调用链可达的 _StubBubble。"""
+        import pytest as _pytest
+        from PySide6.QtWidgets import QApplication
+
+        # 必须是 QApplication（非 QCoreApplication）：本测试真跑
+        # _show_swarm_notice → _register_interaction 链路会起 GUI 侧
+        # QTimer；QCoreApplication 环境下这些 timer 在事件分发器销毁后
+        # 触发 Qt 原生崩溃（"startTimer: dispatcher destroyed"），
+        # 与 test_bubble_text_scale 合跑时整个进程 abort。
+        app = QApplication.instance() or QApplication([])
+        assert app is not None
+
+        from pet.agent_link import AgentLinkManager
+        from pet.config import Config
+
+        cfg = Config(base=tmp_path)
+        mgr = AgentLinkManager(None, cfg)
+        alerts = []
+        shown = []
+
+        class _Win:
+            def show_alert(self, text, **kw):
+                alerts.append((text, kw))
+            def resolve_alert(self, alert_id):
+                pass
+
+        class _StubBubble:
+            def show_notice(self, **kw):
+                shown.append(kw)
+            def dismiss(self):
+                pass
+            def deleteLater(self):
+                pass
+
+        mgr.win = _Win()
+        mgr._swarm_bubble_ref = _StubBubble()
+        # 锚点矩形依赖真实屏幕（offscreen 下 primaryScreen() 为 None），桩掉
+        mgr._swarm_anchor_rect = lambda: __import__("PySide6.QtCore",
+                                                    fromlist=["QRect"]).QRect(0, 0, 10, 10)
+
+        mgr._on_approval_request("swarm", {
+            "type": "permission", "requestId": "p1", "workspace_id": "w1",
+            "task_id": "T1", "title": "bash 权限", "patterns": ["/tmp/x.sh"],
+        })
+        assert len(shown) == 1, "小卡应弹且仅弹 1 次"
+        assert alerts == [], "notice_shown=True 不得再 enqueue alert（双弹）"
+        # pending 照常登记（resolved 幂等清理依赖它）
+        pending = mgr.pending_interactions_for("swarm")
+        assert len(pending) == 1
+        assert next(iter(pending.values()))["notice_shown"] is True
+        mgr._on_approval_resolved("swarm", {"requestId": "p1"})
+        assert mgr.pending_interactions_for("swarm") == {}
+        mgr.shutdown()
+
     def test_swarm_brief_persistent_card(self, tmp_path, monkeypatch):
         """简报卡降级路径（无独立气泡）：sticky 常驻 + 标题带工作区名 + artifact 截 1500。"""
         cfg, mgr = self._make_manager(tmp_path)

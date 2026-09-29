@@ -3709,8 +3709,13 @@ class AgentLinkManager(QObject):
         }
         # 交互打断算"需要主人看一眼"：任务完成后不误说"干完活啦"
         self._saw_alert.add(agent_key)
-        # 常驻气泡：不自动消失，等 resolved / 离线 / 空闲再收尾
-        self._show_interaction_bubble(iid)
+        # 常驻气泡：不自动消失，等 resolved / 离线 / 空闲再收尾。
+        # swarm 权限/提问小卡（notice_shown=True）例外：SwarmBubble 已是它
+        # 的呈现层，再挂 alert 会双弹（用户报告：新小卡 + 旧大卡同屏，
+        # 旧卡 interactive=False 无按钮还关不掉）——只登记 pending 供
+        # resolved 幂等清理，不再进提醒队列。
+        if not extra.get("notice_shown"):
+            self._show_interaction_bubble(iid)
         return iid
 
     def _on_approval_resolved(self, agent_key: str, payload: dict | None = None) -> None:
