@@ -3379,6 +3379,22 @@ class AgentLinkManager(QObject):
             answer = "（任务已取消）"
         elif not answer:
             answer = "（无最终回答文本）"
+        # 本轮任务终态：开始任务时弹的权限/提问小卡（同 task_id 的 pending
+        # 交互，resolved 帧可能早丢/迟至）一并清掉（用户要求：完成本轮任务
+        # 时开始任务的气泡跟着收）——简报卡是本轮的收尾呈现，小卡不该再留。
+        brief_task_id = str(brief.get("task_id") or "")
+        if brief_task_id:
+            for iid in [i for i, v in self._pending_interactions.items()
+                        if v.get("agent_key") == agent_key
+                        and str(v.get("task_id") or "") == brief_task_id]:
+                self._resolve_interaction(iid)
+        elif agent_key == "swarm":
+            # 终态帧不带 task_id（历史/降级形状）：宽收本轮全部 swarm 小卡。
+            # 简报卡顶替一切旧卡，与「单例新卡顶旧卡」语义一致。
+            for iid in [i for i, v in self._pending_interactions.items()
+                        if v.get("agent_key") == agent_key
+                        and v.get("notice_shown")]:
+                self._resolve_interaction(iid)
         bubble = self._swarm_bubble()
         if bubble is None:
             # 降级：无法建独立气泡（测试桩/极端环境）→ 原提醒队列路径
@@ -3800,7 +3816,8 @@ class AgentLinkManager(QObject):
 
         注意：队列（window.show_alert）自己会逐条展示，这里用 resolve_alert
         按 alert_id 精确定位关闭，避免 hide_bubble 误关其他 agent/其他并发审批
-        的提醒。"""
+        的提醒。swarm 权限/提问小卡（notice_shown=True）不在 alert 队列里，
+        呈现层是 SwarmBubble——直接 dismiss。"""
         item = self._pending_interactions.pop(interaction_id, None)
         if item is None:
             return
@@ -3809,6 +3826,13 @@ class AgentLinkManager(QObject):
             self.win.resolve_alert(alert_id)
         elif hasattr(self.win, "hide_bubble"):
             self.win.hide_bubble()
+        if item.get("notice_shown"):
+            bubble = getattr(self, "_swarm_bubble_ref", None)
+            if bubble is not None:
+                try:
+                    bubble.dismiss()
+                except RuntimeError:
+                    pass  # 底层 C++ 已删（Qt 生命周期先行）
 
     def pending_interactions_for(self, agent_key: str) -> dict[str, dict]:
         """返回该 agent 的全部 pending 交互（interaction_id → item）。

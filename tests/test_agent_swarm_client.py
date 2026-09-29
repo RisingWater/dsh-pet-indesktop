@@ -286,6 +286,69 @@ class TestManagerSwarmIntegration:
         assert mgr.pending_interactions_for("swarm") == {}
         mgr.shutdown()
 
+    def test_swarm_brief_clears_task_notice_cards(self, tmp_path):
+        """任务终态简报把开始任务时的权限/提问小卡一并清掉（用户要求）。
+
+        时间线：任务开始 → 权限/提问小卡（sticky，notice_shown=True）→
+        本轮任务完成弹简报大卡。resolved 帧可能早丢/迟至，小卡会一直挂着
+        ——终态简报必须按 task_id 精确清掉本轮 pending 交互并 dismiss 小卡；
+        终态帧不带 task_id 时（历史/降级形状）宽收全部 swarm 小卡（简报卡
+        顶替一切旧卡，与 SwarmBubble 单例「新卡顶旧卡」语义一致）。"""
+        from PySide6.QtCore import QRect
+
+        from pet.agent_link import AgentLinkManager
+        from pet.config import Config
+
+        cfg = Config(base=tmp_path)
+        mgr = AgentLinkManager(None, cfg)
+        dismissed = []
+
+        class _StubBubble:
+            def show_notice(self, **kw):
+                pass
+            def show_brief(self, **kw):
+                pass
+            def dismiss(self):
+                dismissed.append(1)
+            def deleteLater(self):
+                pass
+
+        class _Win:
+            def resolve_alert(self, alert_id):
+                pass
+
+        mgr.win = _Win()
+        mgr._swarm_bubble_ref = _StubBubble()
+        mgr._swarm_anchor_rect = lambda: QRect(0, 0, 10, 10)
+
+        # ① 任务开始：权限小卡（task_id=T1）
+        mgr._on_approval_request("swarm", {
+            "type": "permission", "requestId": "p1", "workspace_id": "w1",
+            "task_id": "T1", "title": "bash 权限", "patterns": ["/tmp/x.sh"],
+        })
+        assert len(mgr.pending_interactions_for("swarm")) == 1
+
+        # ② 本轮任务完成：简报大卡（同 task_id=T1）→ 小卡一并清掉
+        mgr._on_swarm_brief("swarm", {
+            "state": "completed", "workspace_id": "w1", "task_id": "T1",
+            "task_first_line": "帮我修 bug", "answer": "修好了",
+        })
+        assert mgr.pending_interactions_for("swarm") == {}, "终态后 pending 应清空"
+        assert dismissed, "小卡应被 dismiss"
+
+        # ③ 终态帧无 task_id：宽收全部 swarm 小卡
+        mgr._on_approval_request("swarm", {
+            "type": "question", "requestId": "q2", "workspace_id": "w1",
+            "task_id": "T2", "question": "选哪个？", "options": [{"label": "A"}],
+        })
+        assert len(mgr.pending_interactions_for("swarm")) == 1
+        mgr._on_swarm_brief("swarm", {
+            "state": "completed", "workspace_id": "w1",
+            "task_first_line": "x", "answer": "y",
+        })
+        assert mgr.pending_interactions_for("swarm") == {}, "无 task_id 应宽收"
+        mgr.shutdown()
+
     def test_swarm_brief_persistent_card(self, tmp_path, monkeypatch):
         """简报卡降级路径（无独立气泡）：sticky 常驻 + 标题带工作区名 + artifact 截 1500。"""
         cfg, mgr = self._make_manager(tmp_path)
