@@ -58,6 +58,18 @@ MAX_BUBBLE_W = 274 * 3
 MAX_BUBBLE_H = 180 * 4
 
 
+def _sanitize_markdown(text: str) -> str:
+    """转义原始 HTML，避免字面量标签破坏 md 渲染（2026-10-02 根因）。
+
+    agent 回答里常有字面量标签（如 ``<L>``、``<http://…>``）。Qt 的 markdown
+    解析器把未知标签当内联 HTML 原样透传，会污染后续块——实测普通文本里的
+    ``<L>`` 会让紧跟其后的 GFM 表格列宽塌缩到每列约 1 个字符（整个表格
+    竖着排，完全不可读）。只转义 ``&``（先）与 ``<``：HTML 标签由 ``<``
+    起始，``>`` 是 markdown 块引用语法（``> quote``），不能动。
+    """
+    return text.replace("&", "&amp;").replace("<", "&lt;")
+
+
 def _menu_text_color(widget: QWidget) -> str:
     """菜单文字色：跟随 modern 主题（icons.py::_icon_theme 同语义）。
 
@@ -217,7 +229,7 @@ class SwarmBubble(QWidget):
         self._task_label.setText(f"任务：{task_first}" if task_first else "")
         self._task_label.setVisible(bool(task_first))
         body = answer.strip() or "（无最终回答文本）"
-        self._body.setMarkdown(body[:20000])
+        self._body.setMarkdown(_sanitize_markdown(body[:20000]))
         self._show_sized(anchor_rect, wide=True)
 
     def show_notice(self, *, title: str, message: str, workspace_name: str,
@@ -226,7 +238,7 @@ class SwarmBubble(QWidget):
         now = datetime.now().strftime("%H:%M")
         self._meta_label.setText(f"{now} {title} · {workspace_name}")
         self._task_label.hide()
-        self._body.setMarkdown(message)
+        self._body.setMarkdown(_sanitize_markdown(message))
         self._show_sized(anchor_rect, wide=False)
 
     # ------------------------------------------------------------ 尺寸与定位
