@@ -21,6 +21,7 @@ import logging
 from datetime import datetime
 
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -218,6 +219,28 @@ class SwarmBubble(QWidget):
 
     # ------------------------------------------------------------ 展示
 
+    def _set_markdown(self, text: str) -> None:
+        """渲染 md：转义字面量 HTML + 解除代码块不换行（消除横向溢出）。
+
+        两处「太宽」来源：① agent 回答里的字面量标签（如 ``<L>``）会被
+        Qt 当内联 HTML，毒化后续表格；② markdown 代码块默认
+        ``nonBreakableLines``，长命令行/JSON 不换行会把文档撑宽、右侧被
+        裁掉（横向滚动条是关闭的）。转义解决①；逐块清掉②让代码块按宽度
+        换行。GFM 表格本身由 QTextDocument 自动适配页宽（实测 501/350/227
+        三档均不溢出），无需额外处理。
+        """
+        self._body.setMarkdown(_sanitize_markdown(text))
+        doc = self._body.document()
+        cursor = QTextCursor(doc)
+        block = doc.begin()
+        while block.isValid():
+            fmt = block.blockFormat()
+            if fmt.nonBreakableLines():
+                cursor.setPosition(block.position())
+                fmt.setNonBreakableLines(False)
+                cursor.setBlockFormat(fmt)
+            block = block.next()
+
     def show_brief(self, *, title: str, task_first: str, answer: str,
                    workspace_name: str, anchor_rect) -> None:
         """简报卡（大）：时间+工作区 → 指令 → 回答(md)。"""
@@ -229,7 +252,7 @@ class SwarmBubble(QWidget):
         self._task_label.setText(f"任务：{task_first}" if task_first else "")
         self._task_label.setVisible(bool(task_first))
         body = answer.strip() or "（无最终回答文本）"
-        self._body.setMarkdown(_sanitize_markdown(body[:20000]))
+        self._set_markdown(body[:20000])
         self._show_sized(anchor_rect, wide=True)
 
     def show_notice(self, *, title: str, message: str, workspace_name: str,
@@ -238,7 +261,7 @@ class SwarmBubble(QWidget):
         now = datetime.now().strftime("%H:%M")
         self._meta_label.setText(f"{now} {title} · {workspace_name}")
         self._task_label.hide()
-        self._body.setMarkdown(_sanitize_markdown(message))
+        self._set_markdown(message)
         self._show_sized(anchor_rect, wide=False)
 
     # ------------------------------------------------------------ 尺寸与定位

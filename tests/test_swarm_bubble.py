@@ -81,3 +81,49 @@ class TestBubbleTableRendering:
             assert "<L>" in doc.toPlainText().replace(" ", "")
         finally:
             bubble.dismiss()
+
+
+class TestBubbleNoHorizontalOverflow:
+    def test_code_block_wraps_instead_of_overflow(self):
+        """长代码块解除 nonBreakableLines，横向不溢出（滚动条保持关闭）。"""
+        _qapp()
+        bubble = SwarmBubble()
+        try:
+            code = ('SumatraPDF.exe -print-to "HP LaserJet M405dn" '
+                    '-print-settings "2x,duplex,pages=1-8" ' + "x" * 200)
+            md = "说明\n\n```\n" + code + "\n```\n"
+            bubble.show_brief(
+                title="任务完成", task_first="任务", answer=md,
+                workspace_name="ws", anchor_rect=QRect(0, 0, 10, 10),
+            )
+            body = bubble._body
+            assert body.horizontalScrollBar().maximum() == 0, "代码块横向溢出"
+            block = body.document().begin()
+            while block.isValid():
+                assert not block.blockFormat().nonBreakableLines()
+                block = block.next()
+        finally:
+            bubble.dismiss()
+
+    def test_wide_table_fits_narrow_bubble(self):
+        """表头多、单元格长时，缩到最小宽度仍不横向溢出。"""
+        _qapp()
+        from pet.swarm_bubble import MIN_BUBBLE_H, MIN_BUBBLE_W
+
+        bubble = SwarmBubble()
+        try:
+            row = "| 很长很长很长的中文任务名称 | done | 无 | agent_swarm | auto |\n"
+            md = ("| 任务 | 状态 | 依赖 | 执行 | 验收 |\n|---|---|---|---|---|\n"
+                  + row * 3)
+            bubble.show_brief(
+                title="任务完成", task_first="任务", answer=md,
+                workspace_name="ws", anchor_rect=QRect(0, 0, 10, 10),
+            )
+            bubble._resize_to(MIN_BUBBLE_W, MIN_BUBBLE_H)
+            body = bubble._body
+            width = _first_table_width(body.document())
+            assert width is not None
+            assert width <= body.width() + 1, f"窄卡表格溢出（{width}>{body.width()}）"
+            assert body.horizontalScrollBar().maximum() == 0
+        finally:
+            bubble.dismiss()
