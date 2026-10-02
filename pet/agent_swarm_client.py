@@ -104,20 +104,41 @@ def monitor_payload(payload: dict) -> dict | None:
     return out
 
 
+def _brief_meta(payload: dict) -> dict:
+    """简报载荷承载位置：优先顶层 payload.brief，回退历史 metadata.brief。
+
+    2026-10-02 根因：A2A 终态帧按对接契约 §3.2④ 把简报挂在【顶层】
+    payload.brief（{"artifact": "...", ...}），而本模块只读 metadata.brief
+    → answer 恒空；14ms 前 artifact-update 已发的 2234 字回答卡随即被
+    answer_len=0 的终态卡顶掉，用户只看到「（无最终回答文本）」。
+    回归证据：swarm_frames.jsonl 中 12 个 completed 任务全部 top_brief=True、
+    metadata.brief=False。metadata.brief 仅作旧服务端兼容保留。
+    """
+    top = payload.get("brief")
+    if isinstance(top, dict) and top:
+        return top
+    meta = payload.get("metadata")
+    if isinstance(meta, dict):
+        legacy = meta.get("brief")
+        if isinstance(legacy, dict):
+            return legacy
+    return {}
+
+
 def brief_from_status(payload: dict) -> dict | None:
     """终态事件 → 简报载荷（对齐飞书 brief_card 的信息密度）。
 
     返回 {state, task_id, task_first_line, answer, error}：
     - task_first_line：指令首行（终态 message.parts 里 role=user 的首个 text，
-      或 metadata.brief.task_first_line——服务端若已注入优先）
-    - answer：artifact 全文（优先 metadata.brief.artifact，服务端从任务行解密
-      注入；回退 artifact-update 帧的 parts）
-    - error：失败原因（metadata.brief.error）
-    canceled 返回 None（用户主动中断不打扰，对齐飞书 brief.py:98 白名单）。
+      或 brief.task_first_line——服务端若已注入优先）
+    - answer：artifact 全文（优先顶层 payload.brief.artifact，服务端从任务行
+      解密注入；历史回退 metadata.brief.artifact；再回退 message/parts）
+    - error：失败原因（brief.error）
+    非终态（working 等）返回 None；canceled 也返回简报（用户手动取消同样要
+    有结果反馈，2026-09-25 决策）。
     """
     kind = str(payload.get("kind") or "")
-    meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    brief_meta = meta.get("brief") if isinstance(meta.get("brief"), dict) else {}
+    brief_meta = _brief_meta(payload)
     if kind == "artifact-update":
         parts = ((payload.get("artifact") or {}).get("parts") or [])
         text = " ".join(

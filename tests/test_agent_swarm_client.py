@@ -110,8 +110,36 @@ class TestBriefFromStatus:
         assert brief == {"state": "completed", "task_id": "T9",
                          "task_first_line": "", "answer": "干完了", "error": ""}
 
+    def test_top_level_brief_preferred(self):
+        """真实契约 §3.2④：终态帧的 brief 在【顶层】payload.brief（2026-10-02 根因）。
+
+        复刻 swarm_frames.jsonl 中 kfvcZLx7 的真实终态帧形状：顶层 brief.artifact
+        长 1600，无 metadata.brief。修复前只读 metadata.brief → answer 恒空，
+        14ms 前 artifact-update 的 2234 字卡被空卡顶掉。
+        """
+        payload = {
+            "kind": "status-update", "taskId": "kfvcZLx7c23p",
+            "brief": {"artifact": "回答全文" * 400, "task_first_line": "帮我做 x"},
+            "status": {"state": "completed", "message": {"parts": []}},
+        }
+        brief = brief_from_status(payload)
+        assert brief is not None
+        assert len(brief["answer"]) == 1600          # 1600 字，非空
+        assert brief["task_first_line"] == "帮我做 x"
+
+    def test_top_level_brief_over_legacy_metadata(self):
+        """顶层 brief 与历史 metadata.brief 同时存在时，顶层优先。"""
+        payload = {
+            "kind": "status-update", "taskId": "T9",
+            "brief": {"artifact": "顶层回答"},
+            "metadata": {"brief": {"artifact": "旧位置回答"}},
+            "status": {"state": "completed", "message": {"parts": []}},
+        }
+        brief = brief_from_status(payload)
+        assert brief["answer"] == "顶层回答"
+
     def test_metadata_brief_preferred(self):
-        """服务端注入的 metadata.brief（任务行解密）优先于 message parts。"""
+        """历史兼容：旧服务端把简报挂在 metadata.brief 时仍能读到。"""
         payload = {
             "kind": "status-update", "taskId": "T9",
             "metadata": {"brief": {"artifact": "回答全文", "task_first_line": "帮我做 x"}},
@@ -347,6 +375,62 @@ class TestManagerSwarmIntegration:
             "task_first_line": "x", "answer": "y",
         })
         assert mgr.pending_interactions_for("swarm") == {}, "无 task_id 应宽收"
+        mgr.shutdown()
+
+    def test_swarm_brief_prefers_fuller_answer(self, tmp_path):
+        """完整回答优先 + 空终态不顶掉已有回答（2026-10-02 根因/用户决策）。
+
+        真实帧序：artifact-update（answer=2234，完整全文）→ 14ms 后
+        status-update completed（顶层 brief.artifact=1600，是全文的前缀截断）。
+        期望：卡片保留更完整的 2234 字全文，而不是被截断版/空版顶掉。
+        """
+        from PySide6.QtCore import QRect
+
+        from pet.agent_link import AgentLinkManager
+        from pet.config import Config
+
+        cfg = Config(base=tmp_path)
+        mgr = AgentLinkManager(None, cfg)
+        shown = []
+
+        class _StubBubble:
+            def show_brief(self, **kw):
+                shown.append(kw.get("answer", ""))
+            def show_notice(self, **kw):
+                pass
+            def dismiss(self):
+                pass
+            def deleteLater(self):
+                pass
+
+        mgr._swarm_bubble_ref = _StubBubble()
+        mgr._swarm_anchor_rect = lambda: QRect(0, 0, 10, 10)
+        full = "答" * 2234          # artifact-update 全文
+        truncated = full[:1600]     # 终态 brief（契约截断）
+        # ① artifact-update 简报（完整全文）→ 展示
+        mgr._on_swarm_brief("swarm", {
+            "state": "completed", "workspace_id": "w1", "task_id": "T1",
+            "task_first_line": "任务", "answer": full,
+        })
+        assert shown == [full]
+        # ② 终态 brief 只有截断版 → 仍用更完整的全文，不被截断版顶掉
+        mgr._on_swarm_brief("swarm", {
+            "state": "completed", "workspace_id": "w1", "task_id": "T1",
+            "task_first_line": "任务", "answer": truncated,
+        })
+        assert shown[-1] == full and len(shown[-1]) == 2234
+        # ③ 迟到/异常的空终态简报 → 不得出「（无最终回答文本）」空卡
+        mgr._on_swarm_brief("swarm", {
+            "state": "completed", "workspace_id": "w1", "task_id": "T1",
+            "task_first_line": "任务", "answer": "", "error": "",
+        })
+        assert shown[-1] == full, "空终态简报不得覆盖已有回答"
+        # ④ 无先前回答时，空终态仍照常出「（无最终回答文本）」卡
+        mgr._on_swarm_brief("swarm", {
+            "state": "completed", "workspace_id": "w1", "task_id": "T2",
+            "task_first_line": "任务2", "answer": "", "error": "",
+        })
+        assert shown[-1] == "（无最终回答文本）"
         mgr.shutdown()
 
     def test_swarm_brief_persistent_card(self, tmp_path, monkeypatch):

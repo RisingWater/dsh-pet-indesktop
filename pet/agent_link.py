@@ -2369,6 +2369,8 @@ class AgentLinkManager(QObject):
         # 绝不错放行/错关闭其他并发的审批。
         self._pending_interactions: dict[str, dict] = {}
         self._interaction_seq = 0  # 无 rpcId 的降级提示交互本地序号
+        # task_id → 已展示过的非空回答（终态空简报的覆盖防护；有界）
+        self._swarm_task_answers: dict[str, str] = {}
 
         self.monitors: dict[str, BaseAgentMonitor] = {
             "dsh": DshMonitor("dsh", self.config_dir, self),
@@ -3373,16 +3375,26 @@ class AgentLinkManager(QObject):
         task_first = str(brief.get("task_first_line") or "")
         answer = str(brief.get("answer") or "").strip()
         error = str(brief.get("error") or "").strip()
-        if state == "failed":
-            answer = f"**失败原因：{error or answer or '（未提供）'}**"
-        elif state == "canceled" and not answer:
-            answer = "（任务已取消）"
-        elif not answer:
-            answer = "（无最终回答文本）"
+        brief_task_id = str(brief.get("task_id") or "")
+        # 完整回答优先（2026-10-02 用户决策）：服务端终态 brief 按契约截断
+        # （kfvcZLx7: 1600），而此前 artifact-update 帧的 parts 是完整全文
+        # （同任务 2234，且 brief 是其前缀）。同任务已存有更长的回答时用更
+        # 完整的那个，别让截断版/空版把全文顶掉。
+        prior = self._swarm_task_answers.get(brief_task_id, "") if brief_task_id else ""
+        if (state in ("completed", "canceled") and prior
+                and len(prior) > len(answer)):
+            log.info("[swarm-brief] prefer fuller prior answer len=%d over "
+                     "terminal len=%d task=%s",
+                     len(prior), len(answer), brief_task_id[:12])
+            answer = prior
+        # 记录该任务的最佳（最长）回答：供迟到/异常的空终态帧兜底（有界，丢最旧）
+        if brief_task_id and answer and len(answer) >= len(prior):
+            self._swarm_task_answers[brief_task_id] = answer
+            if len(self._swarm_task_answers) > 64:
+                self._swarm_task_answers.pop(next(iter(self._swarm_task_answers)))
         # 本轮任务终态：开始任务时弹的权限/提问小卡（同 task_id 的 pending
         # 交互，resolved 帧可能早丢/迟至）一并清掉（用户要求：完成本轮任务
         # 时开始任务的气泡跟着收）——简报卡是本轮的收尾呈现，小卡不该再留。
-        brief_task_id = str(brief.get("task_id") or "")
         if brief_task_id:
             for iid in [i for i, v in self._pending_interactions.items()
                         if v.get("agent_key") == agent_key
@@ -3395,6 +3407,12 @@ class AgentLinkManager(QObject):
                         if v.get("agent_key") == agent_key
                         and v.get("notice_shown")]:
                 self._resolve_interaction(iid)
+        if state == "failed":
+            answer = f"**失败原因：{error or answer or '（未提供）'}**"
+        elif state == "canceled" and not answer:
+            answer = "（任务已取消）"
+        elif not answer:
+            answer = "（无最终回答文本）"
         bubble = self._swarm_bubble()
         if bubble is None:
             # 降级：无法建独立气泡（测试桩/极端环境）→ 原提醒队列路径
